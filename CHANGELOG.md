@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.8.2 - 2026-10-17
+
+- No user-facing changes recorded.
+
 ## v0.8.1 - 2026-10-17
 
 - fix: 发布脚本遇到已经手写的版本段时只刷新日期，不再从提交记录另插一段，CHANGELOG 不会再出现重复的版本标题。
