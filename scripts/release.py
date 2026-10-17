@@ -65,8 +65,8 @@ def bump_version(version: str) -> None:
         rf'\g<1>{version}',
         1,
     )
-    replace_file("README.md", r"\d+\.\d+\.\d+", version, 1)
-    replace_file("tests/test_app.py", r"\d+\.\d+\.\d+", version)
+    replace_file("README.md", r"^当前版本：`\d+\.\d+\.\d+`", f"当前版本：`{version}`", 1)
+    replace_file("tests/test_app.py", r'(state\["version"\], ")[^"]+', rf"\g<1>{version}", 1)
 
 
 def changelog(version: str) -> None:

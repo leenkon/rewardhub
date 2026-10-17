@@ -16,7 +16,7 @@ python -m pip install -r requirements.txt -r requirements-build.txt
 构建并打包（`binary-package` 会先执行 `binary`），产物在 `build/` 目录：
 
 ```bash
-make VERSION=0.8.0 BINARY_PLATFORM=linux-x86_64 binary-package
+make VERSION=<版本号> BINARY_PLATFORM=linux-x86_64 binary-package
 ```
 
 Windows 把 `BINARY_PLATFORM` 改为 `windows-x86_64`。GitHub Actions 已经直接调用这个 Makefile 目标。

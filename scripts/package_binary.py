@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import re
 import shutil
 import stat
 import sys
@@ -12,18 +11,10 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+from release import SEMVER, current_version
 
 ROOT = Path(__file__).resolve().parents[1]
-SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 PLATFORMS = {"linux-x86_64", "windows-x86_64"}
-
-
-def current_version() -> str:
-    text = (ROOT / "app.py").read_text(encoding="utf-8")
-    match = re.search(r'^APP_VERSION = "([^\"]+)"', text, re.MULTILINE)
-    if not match or not SEMVER.fullmatch(match.group(1)):
-        raise SystemExit("APP_VERSION is missing or invalid")
-    return match.group(1)
 
 
 def package_binary(version: str, platform: str, distpath: Path) -> Path:
