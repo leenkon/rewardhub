@@ -1,0 +1,12 @@
+services:
+  rewardhub:
+    image: ghcr.io/leenkon/rewardhub:latest
+    container_name: rewardhub
+    ports:
+      - "9696:9696"
+    environment:
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+    volumes:
+      - ./points_data:/data
+    restart: unless-stopped
