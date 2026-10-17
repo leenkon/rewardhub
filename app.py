@@ -15,7 +15,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Iterator
 
-from flask import Flask, abort, jsonify, render_template, request, send_file, session
+from flask import Flask, Response, abort, jsonify, render_template, request, send_file, session
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,15 +42,15 @@ PROJECT_ICONS = {
 }
 BUILTIN_ICON_KEYS = set(
     """
-    home broom vacuum clean tidy trash laundry dishes clothes iron bed sleep alarm shower toothbrush handwash bath repair hammer screwdriver
-    cooking meal breakfast lunch dinner bread rice noodles apple banana orange strawberry cake cookie milk water coffee tea juice snack icecream
-    homework book reading pencil school graduation math science language art music idea microscope ruler notebook library exam medal target lightbulb
-    sport run walk bike swim football basketball baseball tennis badminton yoga weight hiking mountain trophy whistle skate climbing fitness stretch
-    car bus train airplane rocket ship taxi bicycle map location suitcase passport ticket traffic fuel travel compass road parking delivery
-    family child baby adult dog cat pet plant flower birthday heart homekey door sofa tv camera phone calendar couple
-    server harddrive folder cloud download upload wifi network database terminal code keyboard printer tablet desktop computer smartphone gamepad
-    office briefcase clock chart mail meeting call checklist pin note moneybag contract build manager megaphone bell search settings shield lock
-    coin money diamond crown badge star fire bolt gem treasure giftbox fireworks crown2 medal2
+    home broom vacuum iron bed sleep alarm shower repair hammer screwdriver
+    meal breakfast dinner bread rice noodles apple banana orange strawberry cake cookie milk coffee tea juice icecream
+    reading graduation math science language art music idea microscope ruler notebook library exam medal target lightbulb
+    run bike swim football basketball baseball tennis badminton yoga weight hiking mountain trophy whistle skate climbing fitness stretch
+    car bus train airplane rocket ship taxi bicycle map location suitcase passport ticket traffic fuel travel compass road parking
+    family child baby adult dog cat flower birthday heart homekey door sofa camera calendar couple
+    server harddrive folder cloud download upload wifi network database terminal code keyboard printer tablet
+    office briefcase clock chart mail meeting call checklist pin note moneybag contract build manager megaphone search settings shield lock
+    diamond crown badge star fire bolt gem treasure giftbox fireworks crown2 medal2
     doctor medicine hospital mask bandage thermometer apple2 water2 heart2 brain lungs health firstaid rest
     sun moon cloud2 rain snow rainbow wind leaf tree flower2 season umbrella temperature earth
     party confetti balloon cake2 music2 flag community handshake speech message announcement megaphone2 group friend smile package
@@ -2212,6 +2212,14 @@ def find_custom_asset(asset_key: str) -> Path | None:
             if nested:
                 return nested[0]
     return None
+
+
+@app.after_request
+def cache_shipped_images(response: Response) -> Response:
+    # Shipped art changes only with the image; scripts and user uploads must revalidate so an upgrade can't leave a stale UI.
+    if request.path.startswith(("/static/illustrations/", "/static/avatars/")):
+        response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
 
 
 @app.get("/custom-assets/<asset_key>")

@@ -712,14 +712,14 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(data["gamification"]["experience"], 25)
         self.assertTrue(any(item["achievement_key"] == "first-quest" and item["unlocked"] for item in data["achievements"]))
 
-    def test_builtin_delivery_icon_is_allowed_and_unknown_icon_is_rejected(self):
+    def test_builtin_package_icon_is_allowed_and_unknown_icon_is_rejected(self):
         self.create_child(username="icon-child", display_name="Icon Child", password="child123")
         response = self.client.post(
             "/api/items/earn",
-            json={"name": "快递取件", "points": 8, "icon": "emoji:delivery"},
+            json={"name": "快递取件", "points": 8, "icon": "emoji:package"},
         )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.get_json()["icon"], "emoji:delivery")
+        self.assertEqual(response.get_json()["icon"], "emoji:package")
         self.assertEqual(
             self.client.post(
                 "/api/items/earn",
