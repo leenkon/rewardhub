@@ -59,12 +59,6 @@ def bump_version(version: str) -> None:
     if not SEMVER.fullmatch(version):
         raise SystemExit(f"Invalid version: {version}")
     replace_file("app.py", r'^APP_VERSION = "[^"]+"$', f'APP_VERSION = "{version}"', 1)
-    replace_file(
-        "Dockerfile",
-        r'(org\.opencontainers\.image\.version=")[^"]+',
-        rf'\g<1>{version}',
-        1,
-    )
     replace_file("README.md", r"^当前版本：`\d+\.\d+\.\d+`", f"当前版本：`{version}`", 1)
     replace_file("tests/test_app.py", r'(state\["version"\], ")[^"]+', rf"\g<1>{version}", 1)
 

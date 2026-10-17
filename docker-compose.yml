@@ -7,6 +7,9 @@ services:
     environment:
       ADMIN_USERNAME: "${ADMIN_USERNAME:-}"
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+      ADMIN_USERNAME_B64: "${ADMIN_USERNAME_B64:-}"
+      ADMIN_PASSWORD_B64: "${ADMIN_PASSWORD_B64:-}"
+      SECRET_KEY: "${SECRET_KEY:-}"
     volumes:
       - ./points_data:/data
     restart: unless-stopped

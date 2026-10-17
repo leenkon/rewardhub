@@ -5,6 +5,7 @@ __pycache__/
 *.log
 data/
 points_data/
+.env
 .venv/
 build/
 dist/

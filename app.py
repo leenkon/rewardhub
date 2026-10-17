@@ -26,7 +26,8 @@ else:
     DEFAULT_DATA_DIR = BASE_DIR / "data"
 DATA_DIR = Path(os.getenv("DATA_DIR", str(DEFAULT_DATA_DIR)))
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(DATA_DIR / "points.db")))
-SECRET_KEY = os.getenv("SECRET_KEY", "change-this-secret-key-in-production")
+# Compose forwards "${SECRET_KEY:-}", so an unset value arrives as an empty string rather than missing.
+SECRET_KEY = os.getenv("SECRET_KEY") or "change-this-secret-key-in-production"
 PASSWORD_ITERATIONS = 240_000
 APP_VERSION = "0.8.3"
 AVATAR_OPTIONS = {"boy", "girl", "adult-male", "adult-female"}
@@ -266,29 +267,6 @@ def create_admin_account(conn: sqlite3.Connection, username: str, password: str)
         (username, password_hash(password), "管理员", "admin", "adult-male", now),
     )
     return conn.execute("SELECT * FROM accounts WHERE username = ?", (username,)).fetchone()
-
-
-def migrate_legacy_admin_account(conn: sqlite3.Connection) -> None:
-    """Replace only the untouched admin/admin123 account with install-time credentials."""
-    credentials = admin_credentials_from_env()
-    if credentials is None:
-        return
-    admin = first_admin(conn)
-    if admin is None or admin["username"] != "admin":
-        return
-    if not password_matches("admin123", admin["password_hash"]):
-        return
-    username, password = credentials
-    if username == "admin" and password == "admin123":
-        return
-    try:
-        conn.execute(
-            "UPDATE accounts SET username = ?, password_hash = ?, display_name = ? WHERE id = ?",
-            (username, password_hash(password), "管理员", admin["id"]),
-        )
-    except sqlite3.IntegrityError:
-        # Never replace a real account that already uses the requested username.
-        return
 
 
 def apply_install_admin_credentials(conn: sqlite3.Connection, credentials: tuple[str, str]) -> bool:
@@ -697,9 +675,6 @@ def init_db() -> None:
         if credentials and not install_credentials_are_applied(credentials):
             if apply_install_admin_credentials(conn, credentials):
                 mark_install_credentials_applied(credentials)
-        else:
-            if first_admin(conn) is None:
-                migrate_legacy_admin_account(conn)
         conn.execute("UPDATE accounts SET avatar = 'adult-male' WHERE username = 'admin' AND avatar = 'boy'")
         remove_legacy_default_child(conn)
         migrate_items_to_library(conn)
@@ -861,6 +836,9 @@ def target_rule_payload(payload: dict[str, Any], kind: str) -> dict[str, Any]:
     measure = str(payload.get("target_measure") or "count").strip().lower()
     if measure not in TARGET_MEASURES:
         raise ValueError("目标口径只能选次数或数量")
+    # Quantity submissions score nothing on their own; without a target there is nothing to settle against.
+    if measure == "quantity" and rule["week_target"] <= 0:
+        raise ValueError("数量口径需要先设目标")
     rule["target_measure"] = measure
     rule["week_penalty"] = non_negative_int(payload.get("week_penalty"), "未达标扣分")
     return rule
@@ -2217,7 +2195,7 @@ def find_custom_asset(asset_key: str) -> Path | None:
 @app.after_request
 def cache_shipped_images(response: Response) -> Response:
     # Shipped art changes only with the image; scripts and user uploads must revalidate so an upgrade can't leave a stale UI.
-    if request.path.startswith(("/static/illustrations/", "/static/avatars/")):
+    if response.status_code == 200 and request.path.startswith(("/static/illustrations/", "/static/avatars/")):
         response.headers["Cache-Control"] = "public, max-age=86400"
     return response
 
@@ -3231,6 +3209,8 @@ def update_item_bindings(account_id: int):
         bindings = payload.get("bindings")
         if not isinstance(bindings, list) or not bindings:
             return api_error("没有需要保存的绑定")
+        # Validate the whole batch before touching the table: connection() commits on return, so an early exit would persist a partial binding set.
+        validated = []
         for entry in bindings:
             kind = str(entry.get("kind") or "") if isinstance(entry, dict) else ""
             if kind not in ITEM_TABLES:
@@ -3241,7 +3221,9 @@ def update_item_bindings(account_id: int):
                 return api_error(str(exc))
             if conn.execute(f"SELECT 1 FROM {ITEM_TABLES[kind]} WHERE id = ?", (item_id,)).fetchone() is None:
                 return api_error("项目不存在", 404)
-            set_item_binding(conn, kind, item_id, account_id, bool(entry.get("enabled", True)))
+            validated.append((kind, item_id, bool(entry.get("enabled", True))))
+        for kind, item_id, enabled in validated:
+            set_item_binding(conn, kind, item_id, account_id, enabled)
         return jsonify(state_payload(conn, user))
 
 
@@ -3260,7 +3242,12 @@ def get_analytics():
         if user["role"] == "child":
             account_ids = [int(user["id"])]
         elif scoped_account_id is not None:
-            account_ids = [scoped_account_id]
+            scoped = conn.execute(
+                "SELECT id FROM accounts WHERE id = ? AND role = 'child' AND active = 1", (scoped_account_id,)
+            ).fetchone()
+            if scoped is None:
+                return api_error("孩子账号不存在", 404)
+            account_ids = [int(scoped["id"])]
         else:
             account_ids = [
                 int(row["id"])
@@ -3275,6 +3262,8 @@ def clear_points():
     with connection() as conn:
         user = current_user(conn)
         account_id = active_child_id(conn, user)
+        if account_id is None:
+            return api_error("当前没有可用的孩子账号")
         clear_child_history(conn, account_id)
         return jsonify(state_payload(conn, user))
 

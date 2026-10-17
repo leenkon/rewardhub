@@ -1,6 +1,6 @@
 .RECIPEPREFIX := >
 
-PYTHON ?= python3
+PYTHON ?= python
 BINARY_NAME ?= RewardHub-$(VERSION)
 BINARY_DIST ?= build/dist
 VERSION ?= $(shell $(PYTHON) scripts/release.py next-version)

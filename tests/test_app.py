@@ -39,7 +39,6 @@ class PointsManagerApiTests(unittest.TestCase):
             create_admin_account,
             init_db,
             mark_install_credentials_applied,
-            migrate_legacy_admin_account,
             password_hash,
         )
         import app as app_module
@@ -55,7 +54,6 @@ class PointsManagerApiTests(unittest.TestCase):
         cls.init_db = init_db
         cls.admin_credentials_marker_path = admin_credentials_marker_path
         cls.mark_install_credentials_applied = mark_install_credentials_applied
-        cls.migrate_legacy_admin_account = migrate_legacy_admin_account
         cls.password_hash = password_hash
         cls.admin_credentials_from_env = admin_credentials_from_env
 
@@ -230,12 +228,11 @@ class PointsManagerApiTests(unittest.TestCase):
             with type(self).connection() as conn:
                 type(self).create_admin_account(conn, "admin", "admin123")
 
-    def test_install_credentials_replace_only_untouched_legacy_admin(self):
+    def test_install_credentials_replace_untouched_legacy_admin(self):
         os.environ["ADMIN_USERNAME"] = "new-admin"
         os.environ["ADMIN_PASSWORD"] = "new-secret"
         try:
-            with type(self).connection() as conn:
-                type(self).migrate_legacy_admin_account(conn)
+            type(self).init_db()
             self.client.post("/api/auth/logout")
             self.assertEqual(
                 self.client.post("/api/auth/login", json={"username": "new-admin", "password": "new-secret"}).status_code,
@@ -254,6 +251,7 @@ class PointsManagerApiTests(unittest.TestCase):
                     "UPDATE accounts SET username = ?, password_hash = ?, display_name = ? WHERE role = 'admin'",
                     ("admin", type(self).password_hash("admin123"), "管理员"),
                 )
+            type(self).mark_install_credentials_applied(("admin", "admin123"))
 
     def test_install_credentials_replace_existing_custom_admin_once(self):
         os.environ["ADMIN_USERNAME"] = "wizard-admin"
@@ -766,6 +764,12 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(data["total_points"], 0)
         self.assertEqual(len(data["rewards"]), len(data["item_library"]["reward"]))
 
+    def test_clear_points_needs_a_child_account(self):
+        self.assertIsNone(self.state()["active_child"])
+        response = self.client.post("/api/system/clear")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("当前没有可用的孩子账号", response.get_json()["error"])
+
     def test_item_library_is_system_wide(self):
         first = self.create_child(username="kid-a")
         second = self.create_child(username="kid-b")
@@ -806,6 +810,22 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/api/items/earn/{item['id']}").status_code, 200)
         self.client.post("/api/auth/select-child", json={"child_id": first["id"]})
         self.assertNotIn(item["id"], [row["id"] for row in self.state()["earn_items"]])
+
+    def test_item_bindings_reject_the_whole_batch_when_one_entry_is_bad(self):
+        child = self.create_child(username="kid-batch")
+        earn = self.client.post("/api/items/earn", json={"name": "批量项目", "points": 3}).get_json()
+        response = self.client.put(
+            f"/api/item-bindings/{child['id']}",
+            json={
+                "bindings": [
+                    {"kind": "earn", "item_id": earn["id"], "enabled": False},
+                    {"kind": "earn", "item_id": earn["id"] + 9999, "enabled": False},
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 404)
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        self.assertIn(earn["id"], [row["id"] for row in self.state()["earn_items"]])
 
     def test_duplicate_item_names_are_rejected(self):
         first = self.client.post("/api/items/earn", json={"name": "阅读 20 分钟", "points": 2}).get_json()
@@ -1143,6 +1163,12 @@ class PointsManagerApiTests(unittest.TestCase):
         )
         self.assertEqual(rejected.status_code, 400)
         self.assertIn("目标口径只能选次数或数量", rejected.get_json()["error"])
+        rejected = self.client.post(
+            "/api/items/earn",
+            json={"name": "无目标数量", "points": 5, "icon": "book.svg", "target_measure": "quantity"},
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("数量口径需要先设目标", rejected.get_json()["error"])
         item = self.client.post(
             "/api/items/earn",
             json={"name": "默认周期", "points": 5, "icon": "book.svg", "week_target": 2, "target_every": 0, "bonus_every": 0},
@@ -1926,6 +1952,8 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(scoped["summary"]["gained"], 10)
         self.assertEqual({row["account_id"] for row in scoped["comparison"]}, {first["id"]})
         self.assertEqual(self.client.get("/api/analytics?days=7&account_id=invalid").status_code, 400)
+        admin_id = [row["id"] for row in self.client.get("/api/accounts").get_json()["accounts"] if row["role"] == "admin"][0]
+        self.assertEqual(self.client.get(f"/api/analytics?days=7&account_id={admin_id}").status_code, 404)
 
         self.client.post("/api/auth/logout")
         self.client.post("/api/auth/login", json={"username": "kid-c", "password": "child123"})
@@ -1949,6 +1977,15 @@ class PointsManagerApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertTrue(response.content_type.startswith("image/"))
             response.close()
+
+    def test_shipped_images_cache_only_when_they_exist(self):
+        hit = self.client.get("/static/illustrations/points.svg")
+        self.assertEqual(hit.status_code, 200)
+        self.assertEqual(hit.headers["Cache-Control"], "public, max-age=86400")
+        hit.close()
+        miss = self.client.get("/static/illustrations/missing-icon.svg")
+        self.assertEqual(miss.status_code, 404)
+        self.assertNotEqual(miss.headers.get("Cache-Control"), "public, max-age=86400")
 
 
 class ItemLibraryMigrationTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 FROM python:3.12-slim-bookworm
 
-LABEL org.opencontainers.image.title="RewardHub" \
-      org.opencontainers.image.version="0.8.3"
+# The release workflow writes the version label; a hardcoded one here would only ever go stale.
+LABEL org.opencontainers.image.title="RewardHub"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,8 +16,6 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check -r /app/req
 COPY app.py .
 COPY templates ./templates
 COPY static ./static
-
-RUN mkdir -p /data
 
 EXPOSE 9696
 CMD ["python", "-u", "app.py"]
