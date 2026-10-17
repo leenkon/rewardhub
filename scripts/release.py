@@ -13,7 +13,8 @@ TAG_PATTERN = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
 def git_output(*args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
+    # Commit subjects are UTF-8; without an explicit encoding a Windows console decodes them as GBK.
+    return subprocess.check_output(["git", *args], cwd=ROOT, text=True, encoding="utf-8").strip()
 
 
 def current_version() -> str:
@@ -69,24 +70,27 @@ def bump_version(version: str) -> None:
 
 
 def changelog(version: str) -> None:
+    """Open this release's section; a section already written by hand keeps its own entries."""
+    path = ROOT / "CHANGELOG.md"
+    today = datetime.now(timezone.utc).date().isoformat()
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        dated, written = re.subn(
+            rf"^## v{re.escape(version)} - .*$", f"## v{version} - {today}", text, count=1, flags=re.MULTILINE
+        )
+        if written:
+            path.write_text(dated, encoding="utf-8", newline="\n")
+            return
+    else:
+        text = "# Changelog\n"
     tag = latest_tag()
     if tag:
         entries = git_output("log", "--pretty=format:- %s (%h)", f"{tag}..HEAD")
     else:
         entries = git_output("log", "--reverse", "--pretty=format:- %s (%h)")
     entries = entries or "- No user-facing changes recorded."
-    section = (
-        f"# Changelog\n\n"
-        f"## v{version} - {datetime.now(timezone.utc).date().isoformat()}\n\n"
-        f"{entries}\n\n"
-    )
-
-    path = ROOT / "CHANGELOG.md"
-    if path.exists():
-        previous = path.read_text(encoding="utf-8")
-        if previous.startswith("# Changelog"):
-            previous = previous[len("# Changelog"):].lstrip("\n")
-        section += previous
+    previous = text[len("# Changelog") :].lstrip("\n") if text.startswith("# Changelog") else text
+    section = f"# Changelog\n\n## v{version} - {today}\n\n{entries}\n\n{previous}"
     path.write_text(section, encoding="utf-8", newline="\n")
 
 
