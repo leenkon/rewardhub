@@ -273,8 +273,34 @@ function updateAccountUi() {
     selector.classList.toggle("hidden", !children.length);
     selector.innerHTML = children.map((child) => `<option value="${child.id}">${escapeHtml(child.display_name)}</option>`).join("");
     selector.value = String(appState.data.active_child_id || "");
+    // The settle bar is static markup, so its period list loads once per unit rather than on every render.
+    if (appState.settlePeriodUnit !== document.getElementById("settle-unit").value) loadSettlePeriods();
   } else {
     selector.classList.add("hidden");
+  }
+}
+
+function syncSettleRun() {
+  const option = document.getElementById("settle-period").selectedOptions[0];
+  document.getElementById("settle-run").disabled = option?.dataset.closed !== "1";
+}
+
+async function loadSettlePeriods() {
+  const unit = document.getElementById("settle-unit").value;
+  const select = document.getElementById("settle-period");
+  // Reloads after a settle run too, so keep the period the admin was looking at.
+  const previous = select.value;
+  appState.settlePeriodUnit = unit;
+  try {
+    const data = await api(`/api/settlements/periods?unit=${encodeURIComponent(unit)}`);
+    select.innerHTML = data.periods
+      .map((row) => `<option value="${row.start}" data-closed="${row.closed ? 1 : 0}" data-settled="${row.settled ? 1 : 0}">${escapeHtml(row.label)}${row.closed ? (row.settled ? "（已结算）" : "") : "（未结束）"}</option>`)
+      .join("");
+    if (data.periods.some((row) => row.start === previous)) select.value = previous;
+    syncSettleRun();
+  } catch (error) {
+    appState.settlePeriodUnit = "";
+    showToast(error.message);
   }
 }
 
@@ -574,9 +600,9 @@ const CAP_PERIOD_TEXT = {
 };
 
 // 同一个周期单位的三种说法：进度胶囊、摘要里的“每周”、以及“每 N …”的量词（目标与连续规则共用这一组）。
-const TARGET_CHIP_TEXT = { day: "今天", week: "本周", month: "本月", quarter: "本季" };
-const TARGET_PERIOD_TEXT = { day: "每天", week: "每周", month: "每月", quarter: "每季" };
-const UNIT_MULTI_TEXT = { day: "天", week: "周", month: "个月", quarter: "个季度" };
+const TARGET_CHIP_TEXT = { day: "今天", week: "本周", month: "本月", quarter: "本季", year: "本年" };
+const TARGET_PERIOD_TEXT = { day: "每天", week: "每周", month: "每月", quarter: "每季", year: "每年" };
+const UNIT_MULTI_TEXT = { day: "天", week: "周", month: "个月", quarter: "个季度", year: "年" };
 
 function targetPeriodText(item, chip = false) {
   const key = UNIT_MULTI_TEXT[item.target_unit] ? item.target_unit : "week";
@@ -1143,12 +1169,14 @@ function readRuleForm(form) {
 
 const ITEM_KIND_LABEL = { earn: "加积分", deduct: "扣积分", reward: "兑换奖励" };
 
-function updateMeasureUI() {
+function updateRuleUI() {
   const panel = document.getElementById("score-rule-fields");
   const quantity = appState.editorKind === "earn" && panel.elements.target_measure.value === "quantity";
   panel.dataset.measure = quantity ? "quantity" : "count";
   // A quantity item's points are the completion score paid when the window closes, not a per-grant award.
   document.getElementById("points-field-label").textContent = quantity ? "完成分" : "积分";
+  // Only reward items may fine a losing streak, so the same field reads either "达标额外" or "未达标".
+  panel.dataset.streak = Number(panel.elements.streak_bonus.value) < 0 ? "penalty" : "award";
 }
 
 function openEditor(kind, id = null) {
@@ -1167,7 +1195,7 @@ function openEditor(kind, id = null) {
   RULE_FIELDS.forEach((field) => { rulePanel.elements[field].value = Number(item?.[field]) || (RULE_DEFAULT_ONE.has(field) ? 1 : 0); });
   RULE_CHECKS.forEach((field) => { rulePanel.elements[field].checked = Boolean(Number(item?.[field] || 0)); });
   Object.entries(RULE_SELECTS).forEach(([field, fallback]) => { rulePanel.elements[field].value = item?.[field] || fallback; });
-  updateMeasureUI();
+  updateRuleUI();
   renderIconPicker();
   showModal("editor-form");
 }
@@ -1775,7 +1803,8 @@ document.getElementById("open-self-password").addEventListener("click", openSelf
 document.getElementById("open-child-register").addEventListener("click", showChildRegister);
 document.getElementById("back-to-login").addEventListener("click", showLogin);
 document.getElementById("account-form").elements.role.addEventListener("change", (event) => fillAvatarOptions(event.target.value));
-document.getElementById("score-rule-fields").elements.target_measure.addEventListener("change", updateMeasureUI);
+document.getElementById("score-rule-fields").elements.target_measure.addEventListener("change", updateRuleUI);
+document.getElementById("score-rule-fields").elements.streak_bonus.addEventListener("input", updateRuleUI);
 document.querySelectorAll(".quick-entry select").forEach((select) => select.addEventListener("change", (event) => updateQuickForm(event.target.closest("form"))));
 document.getElementById("adventure-level-form")?.elements.mode.addEventListener("change", (event) => {
   const level = document.getElementById("adventure-level-form")?.elements.level;
@@ -1822,6 +1851,25 @@ document.getElementById("clear-points").addEventListener("click", async () => {
 document.getElementById("reset-system").addEventListener("click", async () => {
   if (!await requestConfirm("将恢复当前孩子的默认设置，确定吗？", { title: "恢复默认设置", confirmLabel: "恢复默认" })) return;
   try { appState.data = await api("/api/system/reset", { method: "POST" }); render(); showToast("已恢复默认设置"); } catch (error) { showToast(error.message); }
+});
+document.getElementById("settle-unit").addEventListener("change", loadSettlePeriods);
+document.getElementById("settle-period").addEventListener("change", syncSettleRun);
+document.getElementById("settle-run").addEventListener("click", async () => {
+  const unit = document.getElementById("settle-unit");
+  const period = document.getElementById("settle-period").selectedOptions[0];
+  const settled = period.dataset.settled === "1";
+  const ask = settled
+    ? "该期已结算过，重算会撤销它已入账的奖惩，并连同其后各期按当前记录重算，确定吗？"
+    : `将结算全部孩子${unit.selectedOptions[0].textContent}「${period.textContent}」起的奖惩，确定吗？`;
+  if (!await requestConfirm(ask, settled ? { title: "重新核算", confirmLabel: "重算" } : { title: "手动结算", confirmLabel: "结算", danger: false })) return;
+  try {
+    const data = await api("/api/settlements/run", { method: "POST", body: JSON.stringify({ unit: unit.value, period: period.value, force: settled }) });
+    const written = data.settlement;
+    appState.data = data;
+    render();
+    await loadSettlePeriods();
+    showToast(written.entries ? `${settled ? "重算写入" : "已结算"} ${written.entries} 条，共 ${signed(written.points)} 分` : (settled ? "重算后没有奖惩" : "没有待结算的奖惩"));
+  } catch (error) { showToast(error.message); }
 });
 
 renderQuestIconPicker();

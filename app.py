@@ -95,12 +95,13 @@ CAP_PERIOD_LABELS = {
     "year": "每年",
 }
 CAP_PERIOD_MONTHS = {"month": 1, "quarter": 3, "half_year": 6, "year": 12}
-STREAK_PERIOD_TEXT = {"day": "天", "week": "周", "month": "个月", "quarter": "个季度"}
+STREAK_PERIOD_TEXT = {"day": "天", "week": "周", "month": "个月", "quarter": "个季度", "year": "年"}
 DEDUCT_STREAK_SOURCES = {
     "day": "deduct_day_streak",
     "week": "deduct_week_streak",
     "month": "deduct_month_streak",
     "quarter": "deduct_quarter_streak",
+    "year": "deduct_year_streak",
 }
 # Earn streaks are graded against the item's own target windows, so one source covers every window unit.
 TARGET_STREAK_SOURCE = "target_streak"
@@ -114,12 +115,15 @@ STREAK_LOOKBACK_PERIODS = {
     "week": WEEK_SETTLE_LOOKBACK,
     "month": WEEK_SETTLE_LOOKBACK,
     "quarter": 4,
+    "year": 2,
 }
-# Target windows and deduct streaks choose from the same four units.
-RULE_UNITS = ("day", "week", "month", "quarter")
-RULE_UNIT_TEXT = "天、周、月或季"
+# Target windows and deduct streaks choose from the same units; only day settles on its own.
+RULE_UNITS = ("day", "week", "month", "quarter", "year")
+RULE_UNIT_SHORT_TEXT = {"day": "天", "week": "周", "month": "月", "quarter": "季", "year": "年"}
+AUTO_SETTLE_UNITS = ("day",)
+MANUAL_SETTLE_UNITS = tuple(unit for unit in RULE_UNITS if unit not in AUTO_SETTLE_UNITS)
 TARGET_MEASURES = ("count", "quantity")
-TARGET_WINDOW_DAYS = {"day": 1, "week": 7, "month": 28, "quarter": 84}
+TARGET_WINDOW_DAYS = {"day": 1, "week": 7, "month": 28, "quarter": 84, "year": 365}
 TARGET_SETTLE_DAYS = 7 * WEEK_SETTLE_LOOKBACK
 # Windows longer than one unit count from this fixed Monday, so every account shares the same boundaries.
 WINDOW_EPOCH = date(2000, 1, 3)
@@ -800,6 +804,11 @@ def rule_flag(value: Any) -> int:
     return 1 if value not in (None, "", 0, False, "false", "0") else 0
 
 
+def unit_choice_text(units: tuple[str, ...]) -> str:
+    names = [RULE_UNIT_SHORT_TEXT[unit] for unit in units]
+    return names[0] if len(names) < 2 else "、".join(names[:-1]) + "或" + names[-1]
+
+
 def streak_rule_payload(payload: dict[str, Any], kind: str) -> dict[str, Any]:
     """streak_weeks counts deduct periods in streak_unit, but earn target windows, so days reuse the week-named column."""
     bonus = signed_int(payload.get("streak_bonus") or 0, "连续额外分值")
@@ -811,7 +820,7 @@ def streak_rule_payload(payload: dict[str, Any], kind: str) -> dict[str, Any]:
             raise ValueError("连续扣分分值请填正数")
         unit = str(payload.get("streak_unit") or "week").strip().lower()
         if unit not in RULE_UNITS:
-            raise ValueError(f"连续周期只能选{RULE_UNIT_TEXT}")
+            raise ValueError(f"连续周期只能选{unit_choice_text(RULE_UNITS)}")
         return {"streak_weeks": periods, "streak_bonus": bonus, "streak_unit": unit}
     if bonus and non_negative_int(payload.get("week_target") or 0, "目标数值") <= 0:
         raise ValueError("连续奖惩需要先设目标")
@@ -822,7 +831,7 @@ def target_rule_payload(payload: dict[str, Any], kind: str) -> dict[str, Any]:
     """Target window columns; the week-named counters hold whatever window and measure the item picked."""
     unit = str(payload.get("target_unit") or "week").strip().lower()
     if unit not in RULE_UNITS:
-        raise ValueError(f"目标周期只能选{RULE_UNIT_TEXT}")
+        raise ValueError(f"目标周期只能选{unit_choice_text(RULE_UNITS)}")
     rule = {
         "week_target": non_negative_int(payload.get("week_target"), "目标数值"),
         "week_bonus": non_negative_int(payload.get("week_bonus"), "超额分值"),
@@ -1155,8 +1164,12 @@ def load_bound_item(
 
 
 def window_unit(unit: str, every: int = 1) -> tuple[str, int]:
-    """Quarters reuse the month anchor, which already starts on January, April, July and October."""
-    return ("month", every * 3) if unit == "quarter" else (unit, every)
+    """Quarters and years reuse the month anchor, which already starts on January and every 12th January."""
+    if unit == "quarter":
+        return ("month", every * 3)
+    if unit == "year":
+        return ("month", every * 12)
+    return (unit, every)
 
 
 def period_start(unit: str, day: str, every: int = 1) -> str:
@@ -1198,6 +1211,49 @@ def period_range(unit: str, start: str, end: str, every: int = 1) -> Iterator[st
 
 def target_lookback_steps(unit: str, every: int) -> int:
     return max(2, -(-TARGET_SETTLE_DAYS // (TARGET_WINDOW_DAYS[unit] * every)))
+
+
+def period_label(unit: str, start: str) -> str:
+    """Names for the manual settle picker; quarters and years ride on the month anchor, so they need their own text."""
+    day = date.fromisoformat(start)
+    if unit == "week":
+        return f"{day.month}月{day.day}日那周"
+    if unit == "month":
+        return f"{day.year}年{day.month}月"
+    if unit == "quarter":
+        return f"{day.year}年第{(day.month - 1) // 3 + 1}季度"
+    if unit == "year":
+        return f"{day.year}年"
+    return start
+
+
+def settled_window_starts(conn: sqlite3.Connection, unit: str) -> set[str]:
+    """Periods this unit already graded. Day rules share the watermark table, so each item's own target unit decides."""
+    units = {(kind, int(item["id"])): item_target(item)[0] for kind, item in rule_items(conn)}
+    return {
+        row["week_start"]
+        for row in conn.execute("SELECT item_kind, item_id, week_start FROM weekly_settlements")
+        if units.get((row["item_kind"], int(row["item_id"]))) == unit
+    }
+
+
+def settlement_periods(unit: str, today: str, settled: set[str]) -> list[dict[str, Any]]:
+    """The current period plus every older one manual settlement can still reach, newest first."""
+    current = period_start(unit, today)
+    periods = []
+    for steps in range(STREAK_LOOKBACK_PERIODS[unit] + 1):
+        start = period_shift(unit, 1, current, -steps)
+        end = period_end(unit, start)
+        periods.append(
+            {
+                "start": start,
+                "end": end,
+                "label": period_label(unit, start),
+                "closed": end < today,
+                "settled": start in settled,
+            }
+        )
+    return periods
 
 
 def completion_counts(
@@ -1444,6 +1500,22 @@ def resettle_item_windows(
     )
 
 
+def regrade_windows(conn: sqlite3.Connection, account_ids: list[int], unit: str, since: str) -> None:
+    """Undo what one unit already paid from the chosen period onward, so the settle walk recomputes the whole chain."""
+    item_ids: dict[str, list[int]] = {"earn": [], "deduct": []}
+    for kind, item in rule_items(conn):
+        if item_target(item)[0] == unit:
+            item_ids[kind].append(int(item["id"]))
+    for item in streak_rule_items(conn):
+        item_id = int(item["id"])
+        if item["streak_unit"] == unit and item_id not in item_ids["deduct"]:
+            item_ids["deduct"].append(item_id)
+    for account_id in account_ids:
+        for kind, ids in item_ids.items():
+            for item_id in ids:
+                resettle_item_windows(conn, account_id, kind, item_id, since)
+
+
 def settle_target_window(
     conn: sqlite3.Connection,
     account_id: int,
@@ -1524,6 +1596,7 @@ def settle_earn_streak(
     per_date: dict[str, list[int]],
     windows: list[str],
     timestamp: str,
+    only_from: str = "",
 ) -> None:
     """A positive bonus pays every full run of windows on target, a negative one pays every run missed."""
     target = int(item["streak_weeks"] or 0)
@@ -1532,12 +1605,14 @@ def settle_earn_streak(
         return
     item_id = int(item["id"])
     unit, every = item_target(item)
+    # The run has to count from the whole chain even when only the tail gets paid, so the filter lands on the write.
+    only_from = period_start(unit, only_from, every) if only_from else ""
     quota = int(item["week_target"])
     on_target = amount > 0
     run = 0
     for start in windows:
         run = run + 1 if (window_count(item, per_date, start) >= quota) == on_target else 0
-        if not run or run % target:
+        if not run or run % target or start < only_from:
             continue
         settle_date = period_end(unit, start, every)
         if has_settlement_record(conn, account_id, "earn", item_id, TARGET_STREAK_SOURCE, settle_date):
@@ -1555,7 +1630,12 @@ def settle_earn_streak(
         )
 
 
-def settle_target_rules(conn: sqlite3.Connection, account_ids: list[int]) -> None:
+def settle_target_rules(
+    conn: sqlite3.Connection,
+    account_ids: list[int],
+    units: tuple[str, ...] = RULE_UNITS,
+    only_from: str = "",
+) -> None:
     """Lazy settlement of target window rules for both scoring directions, per child and only for their bound items."""
     if not account_ids:
         return
@@ -1567,14 +1647,28 @@ def settle_target_rules(conn: sqlite3.Connection, account_ids: list[int]) -> Non
     plans = []
     for kind, item in rules:
         unit, every = item_target(item)
-        plans.append((kind, item, unit, every, period_start(unit, today, every), item_window_floor(item, today)))
+        if unit not in units:
+            continue
+        plans.append(
+            (
+                kind,
+                item,
+                unit,
+                every,
+                period_start(unit, today, every),
+                item_window_floor(item, today),
+                period_start(unit, only_from, every) if only_from else "",
+            )
+        )
+    if not plans:
+        return
     kinds = {plan[0] for plan in plans}
     since = min(plan[5] for plan in plans)
     for account_id in account_ids:
         account_id = int(account_id)
         counts = {kind: completion_counts(conn, account_id, kind, since) for kind in kinds}
         blocked = {kind: excluded_item_ids(conn, kind, account_id) for kind in kinds}
-        for kind, item, unit, every, current, floor in plans:
+        for kind, item, unit, every, current, floor, from_start in plans:
             item_id = int(item["id"])
             per_date = counts[kind].get(item_id) or {}
             # A project the child never logged has nothing to reward and nothing to fine.
@@ -1583,9 +1677,10 @@ def settle_target_rules(conn: sqlite3.Connection, account_ids: list[int]) -> Non
             first = max(floor, period_start(unit, min(per_date), every))
             windows = list(period_range(unit, first, current, every))
             for start in windows:
-                settle_target_window(conn, account_id, kind, item, per_date, start, timestamp)
+                if start >= from_start:
+                    settle_target_window(conn, account_id, kind, item, per_date, start, timestamp)
             if kind == "earn":
-                settle_earn_streak(conn, account_id, item, per_date, windows, timestamp)
+                settle_earn_streak(conn, account_id, item, per_date, windows, timestamp, from_start)
 
 
 def streak_rule_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -1607,11 +1702,13 @@ def streak_start(unit: str, today: str, rule_set_at: str | None) -> str:
     return start
 
 
-def settle_streaks(conn: sqlite3.Connection, account_ids: list[int]) -> None:
+def settle_streaks(
+    conn: sqlite3.Connection, account_ids: list[int], units: tuple[str, ...] = RULE_UNITS, only_from: str = ""
+) -> None:
     """Deduct items pay an extra deduction for every N straight periods they were scored."""
     if not account_ids:
         return
-    items = streak_rule_items(conn)
+    items = [item for item in streak_rule_items(conn) if item["streak_unit"] in units]
     if not items:
         return
     today = current_date()
@@ -1629,13 +1726,15 @@ def settle_streaks(conn: sqlite3.Connection, account_ids: list[int]) -> None:
                 continue
             unit = item["streak_unit"]
             start = starts[item_id]
+            from_start = period_start(unit, only_from) if only_from else ""
             periods = {period_start(unit, day) for day in dates}
             target = int(item["streak_weeks"])
             source = DEDUCT_STREAK_SOURCES[unit]
             streak = 0
             for period in period_range(unit, start, period_start(unit, today)):
                 streak = streak + 1 if period in periods else 0
-                if not streak or streak % target:
+                # The chain counts from the whole lookback; only the chosen tail may write.
+                if not streak or streak % target or period < from_start:
                     continue
                 settle_date = period_end(unit, period)
                 if has_settlement_record(conn, account_id, "deduct", item_id, source, settle_date):
@@ -2128,8 +2227,8 @@ def state_payload(conn: sqlite3.Connection, user: sqlite3.Row) -> dict[str, Any]
     is_admin = user["role"] == "admin"
     child_ids = [int(row["id"]) for row in children]
     settle_ids = child_ids if is_admin else [account_id] if account_id else []
-    settle_target_rules(conn, settle_ids)
-    settle_streaks(conn, settle_ids)
+    settle_target_rules(conn, settle_ids, AUTO_SETTLE_UNITS)
+    settle_streaks(conn, settle_ids, AUTO_SETTLE_UNITS)
     records = conn.execute(
         "SELECT id, title, amount, type, date, time, source, quantity FROM records WHERE account_id = ? ORDER BY id DESC",
         (account_id,),
@@ -3254,6 +3353,60 @@ def get_analytics():
                 for row in conn.execute("SELECT id FROM accounts WHERE role = 'child' AND active = 1 ORDER BY id").fetchall()
             ]
         return jsonify(analytics_payload(conn, account_ids, days))
+
+
+@app.get("/api/settlements/periods")
+@require_admin
+def list_settlement_periods():
+    """Periods the manual settle bar lists for a unit; the newest one is still open and cannot be graded."""
+    unit = str(request.args.get("unit") or "").strip().lower()
+    if unit not in MANUAL_SETTLE_UNITS:
+        return api_error(f"结算周期只能选{unit_choice_text(MANUAL_SETTLE_UNITS)}")
+    with connection() as conn:
+        settled = settled_window_starts(conn, unit)
+    return jsonify({"unit": unit, "periods": settlement_periods(unit, current_date(), settled)})
+
+
+@app.post("/api/settlements/run")
+@require_admin
+def run_settlement():
+    """Grade one period unit's closed windows on demand; day rules keep settling whenever the page loads."""
+    payload = request.get_json(silent=True) or {}
+    unit = str(payload.get("unit") or "").strip().lower()
+    if unit not in MANUAL_SETTLE_UNITS:
+        return api_error(f"结算周期只能选{unit_choice_text(MANUAL_SETTLE_UNITS)}")
+    period = str(payload.get("period") or "").strip()[:10]
+    force = bool(payload.get("force"))
+    if force and not period:
+        return api_error("强制重算需要指定期次")
+    if period:
+        try:
+            date.fromisoformat(period)
+        except ValueError:
+            return api_error("结算期次日期无效")
+        if period_end(unit, period_start(unit, period)) >= current_date():
+            return api_error(f"{period_label(unit, period_start(unit, period))}尚未结束，不能结算")
+    with connection() as conn:
+        user = current_user(conn)
+        account_ids = [
+            int(row["id"])
+            for row in conn.execute("SELECT id FROM accounts WHERE role = 'child' AND active = 1 ORDER BY id").fetchall()
+        ]
+        newest = int(conn.execute("SELECT COALESCE(MAX(id), 0) AS id FROM records").fetchone()["id"])
+        if force:
+            regrade_windows(conn, account_ids, unit, period)
+        settle_target_rules(conn, account_ids, (unit,), period)
+        settle_streaks(conn, account_ids, (unit,), period)
+        written = conn.execute(
+            f"""
+            SELECT COUNT(*) AS entries, COALESCE(SUM(amount), 0) AS points FROM records
+            WHERE id > ? AND source IN ({", ".join("?" * len(AUTO_SETTLEMENT_SOURCES))})
+            """,
+            (newest, *AUTO_SETTLEMENT_SOURCES),
+        ).fetchone()
+        result = state_payload(conn, user)
+        result["settlement"] = {"unit": unit, "entries": int(written["entries"]), "points": int(written["points"])}
+        return jsonify(result)
 
 
 @app.post("/api/system/clear")

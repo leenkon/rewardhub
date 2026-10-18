@@ -116,6 +116,9 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .text-button { padding: 3px 0; color: var(--green-dark); background: transparent; border: 0; font-size: 13px; font-weight: 800; }
 .control-panel { background: var(--tint); }
 .button-row, .row-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.button-row select { width: auto; margin: 0; font-size: 13px; }
+.button:disabled { opacity: .45; cursor: not-allowed; }
+.button:disabled:hover { filter: none; }
 .table-scroll { width: 100%; overflow-x: auto; }
 .management-table { width: 100%; min-width: 690px; border-collapse: collapse; font-size: 13px; }
 .management-table th { color: var(--muted); background: var(--tint); font-size: 11px; font-weight: 800; white-space: nowrap; }
@@ -203,6 +206,8 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .score-rule:not([data-kind="deduct"]) .rule-deduct-only { display: none; }
 .score-rule[data-measure="quantity"] .rule-count-only { display: none; }
 .score-rule:not([data-measure="quantity"]) .rule-quantity-only { display: none; }
+.score-rule:not([data-streak="penalty"]) .rule-streak-penalty { display: none; }
+.score-rule[data-streak="penalty"] .rule-streak-award { display: none; }
 .rule-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
 .rule-row:first-of-type { margin-top: 0; }
 .rule-label { flex: 0 0 56px; color: var(--ink); font-size: 11px; font-weight: 800; }
