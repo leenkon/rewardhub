@@ -155,6 +155,8 @@ AUTO_SETTLEMENT_SOURCES = (
     *TARGET_WINDOW_SOURCES["deduct"],
     *DEDUCT_STREAK_SOURCES.values(),
 )
+# The payout index and the INSERT's conflict target have to spell one identical predicate, or the target stops matching.
+SETTLEMENT_SOURCE_PREDICATE = "source IN (" + ", ".join(f"'{source}'" for source in AUTO_SETTLEMENT_SOURCES) + ")"
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 CUSTOM_ASSET_KEYS = {
     "child-boy", "child-girl", "adult-male", "adult-female",
@@ -687,6 +689,7 @@ def init_db() -> None:
         remove_legacy_default_child(conn)
         migrate_items_to_library(conn)
         ensure_item_schema(conn)
+        ensure_settlement_uniqueness(conn)
 
 
 def ensure_item_schema(conn: sqlite3.Connection) -> None:
@@ -752,6 +755,27 @@ def ensure_settlement_kind(conn: sqlite3.Connection) -> None:
     )
     conn.execute("DROP TABLE weekly_settlements")
     conn.execute("ALTER TABLE weekly_settlements_by_kind RENAME TO weekly_settlements")
+
+
+def ensure_settlement_uniqueness(conn: sqlite3.Connection) -> None:
+    """Streak payouts own no watermark table, so their record key has to be the guard against a second write."""
+    # An install that raced before this index existed keeps the first record of each window; NULL keys stay free because the index ignores them.
+    keyed = f"{SETTLEMENT_SOURCE_PREDICATE} AND account_id IS NOT NULL AND item_kind IS NOT NULL AND item_id IS NOT NULL"
+    conn.execute(
+        f"""
+        DELETE FROM records
+        WHERE {keyed} AND id NOT IN (
+            SELECT MIN(id) FROM records WHERE {keyed}
+            GROUP BY account_id, item_kind, item_id, date, source
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS records_settlement_once
+        ON records(account_id, item_kind, item_id, date, source) WHERE {SETTLEMENT_SOURCE_PREDICATE}
+        """
+    )
 
 
 def current_date() -> str:
@@ -1429,9 +1453,10 @@ def add_settlement_record(
     timestamp: str,
 ) -> None:
     conn.execute(
-        """
+        f"""
         INSERT INTO records(account_id, title, amount, type, date, time, created_at, item_kind, item_id, source)
         VALUES (?, ?, ?, ?, ?, '23:59', ?, ?, ?, ?)
+        ON CONFLICT(account_id, item_kind, item_id, date, source) WHERE {SETTLEMENT_SOURCE_PREDICATE} DO NOTHING
         """,
         (
             account_id,
@@ -1445,20 +1470,6 @@ def add_settlement_record(
             source,
         ),
     )
-
-
-def has_settlement_record(
-    conn: sqlite3.Connection, account_id: int, item_kind: str, item_id: int, source: str, day: str
-) -> bool:
-    row = conn.execute(
-        """
-        SELECT 1 FROM records
-        WHERE account_id = ? AND item_kind = ? AND item_id = ? AND source = ? AND date = ?
-        LIMIT 1
-        """,
-        (account_id, item_kind, item_id, source, day),
-    ).fetchone()
-    return row is not None
 
 
 def item_window_floor(item: sqlite3.Row | dict[str, Any], today: str) -> str:
@@ -1629,8 +1640,6 @@ def settle_earn_streak(
         if not run or run % target or start < only_from:
             continue
         settle_date = period_end(unit, start, every)
-        if has_settlement_record(conn, account_id, "earn", item_id, TARGET_STREAK_SOURCE, settle_date):
-            continue
         add_settlement_record(
             conn,
             account_id,
@@ -1751,8 +1760,6 @@ def settle_streaks(
                 if not streak or streak % target or period < from_start:
                     continue
                 settle_date = period_end(unit, period)
-                if has_settlement_record(conn, account_id, "deduct", item_id, source, settle_date):
-                    continue
                 add_settlement_record(
                     conn,
                     account_id,

@@ -2126,6 +2126,26 @@ class PointsManagerApiTests(unittest.TestCase):
         records = self.settle("week", self.monday(6).isoformat(), force=True)["records"]
         self.assertEqual([row["amount"] for row in records if row["source"] == "deduct_month_streak"], [-3])
 
+    def test_a_second_settle_walk_cannot_pay_one_window_twice(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        item = self.client.post(
+            "/api/items/earn",
+            json={"name": "阅读", "points": 2, "icon": "book.svg", "week_target": 2, "week_bonus": 4},
+        ).get_json()
+        self.backdate_rule(item["id"], self.monday(1))
+        self.grant(item["id"], weeks_back=1, times=3)
+        paid = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
+        self.assertEqual([(row["title"], row["amount"]) for row in paid], [("阅读 3/2", 4)])
+
+        # A lost watermark used to be enough to pay the same window again; the record key now blocks it.
+        with type(self).connection() as conn:
+            conn.execute("DELETE FROM weekly_settlements WHERE item_kind = 'earn' AND item_id = ?", (item["id"],))
+        self.settle()
+        self.assertEqual(len([row for row in self.state()["records"] if row["source"] == "weekly_bonus"]), 1)
+        self.assertEqual(self.state()["total_points"], 3 * 2 + 4)
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
     def test_cap_and_day_count_edits_keep_weekly_rule_anchor(self):
         child = self.create_child()
         self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
@@ -2326,6 +2346,42 @@ class ItemLibraryMigrationTests(unittest.TestCase):
                     self.assertTrue(all(icon.endswith(".svg") for icon in icons))
             finally:
                 app_module.DATA_DIR, app_module.DATABASE_PATH = original
+
+    def test_upgrade_keeps_one_payout_per_settled_window(self):
+        import app as app_module
+
+        rows = [
+            ("00:01", "target_streak"), ("00:02", "target_streak"), ("00:03", "target_streak"),
+            ("00:04", "weekly_bonus"), ("00:05", "weekly_bonus"),
+            # Ordinary logs repeat an item on the same day on purpose, so they stay outside the guard.
+            ("00:06", "earn"), ("00:07", "earn"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "points.db"
+            with contextlib.closing(sqlite3.connect(database)) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute(
+                    "CREATE TABLE records ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, item_kind TEXT, "
+                    "item_id INTEGER, date TEXT, time TEXT, source TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO records(account_id, item_kind, item_id, date, time, source) "
+                    "VALUES (2, 'earn', 7, '2026-08-30', ?, ?)",
+                    rows,
+                )
+                app_module.ensure_settlement_uniqueness(conn)
+                kept = [(row["time"], row["source"]) for row in conn.execute("SELECT time, source FROM records ORDER BY id")]
+                self.assertEqual(kept, [("00:01", "target_streak"), ("00:04", "weekly_bonus"), ("00:06", "earn"), ("00:07", "earn")])
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        "INSERT INTO records(account_id, item_kind, item_id, date, time, source) "
+                        "VALUES (2, 'earn', 7, '2026-08-30', '00:08', 'target_streak')"
+                    )
+                conn.execute(
+                    "INSERT INTO records(account_id, item_kind, item_id, date, time, source) "
+                    "VALUES (2, 'earn', 7, '2026-08-30', '00:09', 'earn')"
+                )
 
 
 if __name__ == "__main__":
