@@ -10,6 +10,8 @@ services:
       ADMIN_USERNAME_B64: "${ADMIN_USERNAME_B64:-}"
       ADMIN_PASSWORD_B64: "${ADMIN_PASSWORD_B64:-}"
       SECRET_KEY: "${SECRET_KEY:-}"
+      DATA_DIR: "${DATA_DIR:-/data}"
+      DATABASE_PATH: "${DATABASE_PATH:-}"
     volumes:
       - ./points_data:/data
     restart: unless-stopped

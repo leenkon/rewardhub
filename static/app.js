@@ -827,7 +827,6 @@ function resetAnnouncementEditor() {
   if (!form) return;
   appState.announcementEditId = null;
   form.reset();
-  form.elements.announcement_id.value = "";
   form.querySelector("button[type='submit']").textContent = "发布通告";
   document.getElementById("cancel-announcement-edit")?.classList.add("hidden");
 }
@@ -837,7 +836,6 @@ function openAnnouncementEdit(id) {
   const form = document.getElementById("announcement-form");
   if (!announcement || !form) return;
   appState.announcementEditId = Number(id);
-  form.elements.announcement_id.value = announcement.id;
   form.elements.title.value = announcement.title;
   form.elements.content.value = announcement.content;
   form.elements.audience.value = announcement.audience;

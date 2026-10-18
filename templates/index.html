@@ -74,11 +74,10 @@
         <div class="section-heading"><div><h2>家庭通知</h2></div><button class="text-button admin-only" id="announcement-editor-toggle" type="button" aria-expanded="false">发布通知</button></div>
         <div class="admin-only announcement-editor collapsed">
           <form id="announcement-form" class="announcement-form">
-            <input type="hidden" name="announcement_id">
             <label>通知标题<input name="title" maxlength="80" required placeholder="例如：本周家庭安排"></label>
             <label>发布范围<select name="audience"><option value="all">所有账号</option><option value="children">仅孩子账号</option></select></label>
             <label class="field-content">通知内容<textarea name="content" maxlength="500" rows="3" required placeholder="任务目标、规则与截止时间"></textarea></label>
-            <div class="announcement-actions"><button class="button button-primary" type="submit">发布</button><button class="button button-outline hidden" id="cancel-announcement-edit" type="button">取消编辑</button></div>
+            <div class="announcement-actions"><button class="button button-primary" type="submit">发布通告</button><button class="button button-outline hidden" id="cancel-announcement-edit" type="button">取消编辑</button></div>
           </form>
         </div>
         <div class="announcement-list" id="announcement-list"></div>

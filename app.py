@@ -24,8 +24,8 @@ if getattr(sys, "frozen", False):
     DEFAULT_DATA_DIR = Path(sys.executable).resolve().parent / "data"
 else:
     DEFAULT_DATA_DIR = BASE_DIR / "data"
-DATA_DIR = Path(os.getenv("DATA_DIR", str(DEFAULT_DATA_DIR)))
-DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(DATA_DIR / "points.db")))
+DATA_DIR = Path(os.getenv("DATA_DIR") or DEFAULT_DATA_DIR)
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH") or DATA_DIR / "points.db")
 # Compose forwards "${SECRET_KEY:-}", so an unset value arrives as an empty string rather than missing.
 SECRET_KEY = os.getenv("SECRET_KEY") or "change-this-secret-key-in-production"
 PASSWORD_ITERATIONS = 240_000
@@ -144,13 +144,17 @@ TARGET_RULE_FILTERS = {
     "deduct": "week_bonus > 0",
 }
 TARGET_BONUS_SOURCES = {"earn": "weekly_bonus", "deduct": "over_cap_penalty"}
-# Payout/fine sources a target window or streak writes, so a back-dated 补录 can clear exactly its own edits.
-SETTLEMENT_SOURCES = {
+# Sources each settlement family writes, so a regrade clears its own rows and nobody else's: earn streaks ride on the target windows.
+TARGET_WINDOW_SOURCES = {
     "earn": (TARGET_BONUS_SOURCES["earn"], "weekly_penalty", TARGET_STREAK_SOURCE),
-    "deduct": (TARGET_BONUS_SOURCES["deduct"], *DEDUCT_STREAK_SOURCES.values()),
+    "deduct": (TARGET_BONUS_SOURCES["deduct"],),
 }
 # Undoing one of these records stays a one-off override; undoing a completion log recomputes its windows.
-AUTO_SETTLEMENT_SOURCES = (*SETTLEMENT_SOURCES["earn"], *SETTLEMENT_SOURCES["deduct"])
+AUTO_SETTLEMENT_SOURCES = (
+    *TARGET_WINDOW_SOURCES["earn"],
+    *TARGET_WINDOW_SOURCES["deduct"],
+    *DEDUCT_STREAK_SOURCES.values(),
+)
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 CUSTOM_ASSET_KEYS = {
     "child-boy", "child-girl", "adult-male", "adult-female",
@@ -407,7 +411,7 @@ def migrate_items_to_library(conn: sqlite3.Connection) -> None:
             tag = match_record_item(conn, row["title"], int(row["amount"]))
             item_kind = row["item_kind"] or (tag[0] if tag else None)
             item_id = row["item_id"] or (tag[1] if tag else None)
-            source = row["source"] or infer_record_source(row["title"], int(row["amount"]), item_kind)
+            source = row["source"] or infer_record_source(row["title"], item_kind)
             conn.execute(
                 f"UPDATE {table} SET item_kind = ?, item_id = ?, source = ? WHERE id = ?",
                 (item_kind, item_id, source, row["id"]),
@@ -1467,32 +1471,50 @@ def item_window_floor(item: sqlite3.Row | dict[str, Any], today: str) -> str:
     return floor
 
 
+def settlement_families(item: dict[str, Any], kind: str, today: str) -> list[tuple[str, int, tuple[str, ...], str, bool]]:
+    """Windows this item settles: (unit, every, sources, earliest regrade, owns an audit row)."""
+    unit, every = item_target(item)
+    families = [(unit, every, TARGET_WINDOW_SOURCES[kind], item_window_floor(item, today), True)]
+    if kind == "deduct" and int(item["streak_weeks"] or 0) and int(item["streak_bonus"] or 0):
+        streak_unit = item["streak_unit"]
+        start = streak_start(streak_unit, today, item["rule_set_at"])
+        families.append((streak_unit, 1, (DEDUCT_STREAK_SOURCES[streak_unit],), start, False))
+    return families
+
+
 def resettle_item_windows(
-    conn: sqlite3.Connection, account_id: int, kind: Any, item_id: Any, since_date: str
+    conn: sqlite3.Connection,
+    account_id: int,
+    kind: Any,
+    item_id: Any,
+    since_date: str,
+    unit: str | None = None,
 ) -> None:
-    """Clear an item's settled windows from a log's window onward so lazy settlement recomputes them."""
+    """Clear the windows a log can change so lazy settlement recomputes them; unit keeps it to one family."""
     if kind not in ("earn", "deduct") or not item_id:
         return
     item = conn.execute(f"SELECT * FROM {ITEM_TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
     if item is None:
         return
-    unit, every = item_target(item)
-    # Windows settlement will never regrade keep their rows: clearing them would silently delete paid history.
-    start = max(period_start(unit, since_date, every), item_window_floor(item, current_date()))
     item_id = int(item["id"])
-    conn.execute(
-        "DELETE FROM weekly_settlements WHERE account_id = ? AND item_kind = ? AND item_id = ? AND week_start >= ?",
-        (account_id, kind, item_id, start),
-    )
-    sources = SETTLEMENT_SOURCES[kind]
-    conn.execute(
-        f"""
-        DELETE FROM records
-        WHERE account_id = ? AND item_kind = ? AND item_id = ? AND date >= ?
-          AND source IN ({", ".join("?" * len(sources))})
-        """,
-        (account_id, kind, item_id, start, *sources),
-    )
+    for family_unit, every, sources, floor, audited in settlement_families(dict(item), kind, current_date()):
+        if unit and family_unit != unit:
+            continue
+        # Each family anchors in its own unit: clearing another family's tail would delete rows nothing regrades.
+        start = max(period_start(family_unit, since_date, every), floor)
+        if audited:
+            conn.execute(
+                "DELETE FROM weekly_settlements WHERE account_id = ? AND item_kind = ? AND item_id = ? AND week_start >= ?",
+                (account_id, kind, item_id, start),
+            )
+        conn.execute(
+            f"""
+            DELETE FROM records
+            WHERE account_id = ? AND item_kind = ? AND item_id = ? AND date >= ?
+              AND source IN ({", ".join("?" * len(sources))})
+            """,
+            (account_id, kind, item_id, start, *sources),
+        )
 
 
 def regrade_windows(conn: sqlite3.Connection, account_ids: list[int], unit: str, since: str) -> None:
@@ -1508,7 +1530,7 @@ def regrade_windows(conn: sqlite3.Connection, account_ids: list[int], unit: str,
     for account_id in account_ids:
         for kind, ids in item_ids.items():
             for item_id in ids:
-                resettle_item_windows(conn, account_id, kind, item_id, since)
+                resettle_item_windows(conn, account_id, kind, item_id, since, unit)
 
 
 def settle_target_window(
@@ -1524,12 +1546,6 @@ def settle_target_window(
     # A deduct overshoot is a charge: it leaves as a negative record and lands on the penalty side of the audit row.
     charge = kind == "deduct"
     item_id = int(item["id"])
-    already = conn.execute(
-        "SELECT 1 FROM weekly_settlements WHERE account_id = ? AND item_kind = ? AND item_id = ? AND week_start = ?",
-        (account_id, kind, item_id, start),
-    ).fetchone()
-    if already is not None:
-        return
     unit, every = item_target(item)
     tally = window_count(item, per_date, start)
     quota = int(item["week_target"])
@@ -1537,8 +1553,30 @@ def settle_target_window(
     shortfall = int(item["week_penalty"]) if tally < quota else 0
     if not bonus and not shortfall:
         return
-    settle_date = period_end(unit, start, every)
     payout = bonus[1] if bonus else 0
+    # The unique window row is claimed before any money moves, so two settle walks racing on one window pay once.
+    claimed = conn.execute(
+        """
+        INSERT INTO weekly_settlements(
+            account_id, item_kind, item_id, week_start, completions, target, bonus, penalty, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, item_kind, item_id, week_start) DO NOTHING
+        """,
+        (
+            account_id,
+            kind,
+            item_id,
+            start,
+            tally,
+            quota,
+            0 if charge else payout,
+            payout if charge else shortfall,
+            timestamp,
+        ),
+    )
+    if not claimed.rowcount:
+        return
+    settle_date = period_end(unit, start, every)
     if bonus:
         add_settlement_record(
             conn,
@@ -1563,25 +1601,6 @@ def settle_target_window(
             settle_date,
             timestamp,
         )
-    # The audit row records the payout on the side the money actually lands on.
-    conn.execute(
-        """
-        INSERT INTO weekly_settlements(
-            account_id, item_kind, item_id, week_start, completions, target, bonus, penalty, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            account_id,
-            kind,
-            item_id,
-            start,
-            tally,
-            quota,
-            0 if charge else payout,
-            payout if charge else shortfall,
-            timestamp,
-        ),
-    )
 
 
 def settle_earn_streak(
@@ -1747,7 +1766,7 @@ def settle_streaks(
                 )
 
 
-def infer_record_source(title: str, amount: int, item_kind: str | None) -> str:
+def infer_record_source(title: str, item_kind: str | None) -> str:
     text = title or ""
     if text.startswith("兑换现金"):
         return "cash_exchange"
@@ -3012,8 +3031,8 @@ def create_transaction():
                 name = transaction_date
             if user["role"] == "child" and amount < 0 and kind not in ("exchange", "cash_exchange"):
                 return api_error("孩子账号不能扣除积分", 403)
-            if kind == "earn":
-                ensure_submit_cap(conn, item_id if item_kind == "earn" else None, account_id, transaction_date)
+            if item_kind == "earn":
+                ensure_submit_cap(conn, item_id, account_id, transaction_date)
             source = kind
             if user["role"] == "child" and kind in ("earn", "exchange", "manual", "cash_exchange"):
                 cursor = conn.execute(
@@ -3077,7 +3096,7 @@ def approve_request(request_id: int):
             return api_error("待审核申请不存在或已经处理", 404)
         if point_request["amount"] < 0 and get_balance(conn, point_request["account_id"]) < abs(point_request["amount"]):
             return api_error("当前积分不足，无法通过兑换申请", 409)
-        if point_request["kind"] == "earn" and point_request["item_id"] and point_request["item_kind"] == "earn":
+        if point_request["item_kind"] == "earn" and point_request["item_id"]:
             try:
                 ensure_submit_cap(
                     conn,
@@ -3176,7 +3195,6 @@ def create_item(kind: str):
     if not valid_project_icon(icon):
         return api_error("项目图片类型无效")
     with connection() as conn:
-        user = current_user(conn)
         table = ITEM_TABLES[kind]
         if has_duplicate_item_name(conn, table, name):
             return api_error("已有同名项目，请换个名称")
@@ -3204,7 +3222,6 @@ def item_detail(kind: str, item_id: int):
         return api_error("不支持的项目类型", 404)
     table = ITEM_TABLES[kind]
     with connection() as conn:
-        user = current_user(conn)
         existing = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
         if existing is None:
             return api_error("项目不存在", 404)
@@ -3445,4 +3462,4 @@ init_db()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "9696")), debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT") or "9696"), debug=False)

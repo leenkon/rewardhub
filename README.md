@@ -42,11 +42,23 @@ docker compose up -d
 | `DATA_DIR` | 程序目录下的 `data`（镜像内为 `/data`） | 数据目录 |
 | `DATABASE_PATH` | `<DATA_DIR>/points.db` | 数据库文件位置，仅用于把库放到数据目录之外 |
 | `SECRET_KEY` | 内置占位值 | 会话签名密钥，公网或多实例部署时必须设置为自定义值 |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 空 | 仅在数据目录还没有管理员时用于自动创建，密码至少 6 位 |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 空 | 写入后按「安装凭据」一节处理，会覆盖现有管理员 |
 | `ADMIN_USERNAME_B64` / `ADMIN_PASSWORD_B64` | 空 | 上一项的 Base64 形式，优先读取；适配会改写 `$`、`#`、引号的 NAS 环境文件 |
 
 ## 首次创建管理员
 
 首次启动且数据目录中没有管理员账号时，打开页面即可按引导创建管理员用户名和密码。
 
-管理员账号创建后，后续启动不会自动覆盖账号或密码。若数据目录中已经存在账号，安装向导不会重新创建管理员；需要保留数据时请使用已有账号，重新开始前请先备份数据。
+## 安装凭据的行为
+
+数据目录里没有 `DATA_DIR/.admin-credentials.applied` 标记（或标记与这组凭据不符）时，只要设置了 `ADMIN_USERNAME` / `ADMIN_PASSWORD`，启动就会按这组凭据改名、重置现有管理员密码；目录里已有同名账号时只重置它的密码。这一步不会删除任何积分与记录，但会改动登录凭据。
+
+想保住原有账号，要么别设这组变量，要么把 `DATA_DIR`（含标记文件）整体备份并原样恢复。
+
+## 本地运行
+
+```bash
+pip install -r requirements.txt
+python app.py            # 默认 http://127.0.0.1:9696，可用 PORT / DATA_DIR 覆盖
+python -m unittest discover -s tests -q
+```

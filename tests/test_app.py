@@ -2074,6 +2074,58 @@ class PointsManagerApiTests(unittest.TestCase):
         self.client.delete(f"/api/items/earn/{open_item}")
         self.client.delete(f"/api/items/earn/{item['id']}")
 
+    def test_backdated_log_respects_the_submit_cap(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        item = self.client.post(
+            "/api/items/earn", json={"name": "每日上限", "points": 3, "icon": "book.svg", "cap_period": "day"}
+        ).get_json()
+        today = date.today().isoformat()
+        self.assertEqual(
+            self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"], "date": today}).status_code,
+            201,
+        )
+        response = self.client.post(
+            "/api/transactions",
+            json={"kind": "manual", "item_kind": "earn", "item_id": item["id"], "date": today},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("该项目每天只能提交 1 次", response.get_json()["error"])
+
+    def test_regrading_a_month_keeps_the_week_it_already_settled(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        item = self.client.post(
+            "/api/items/deduct",
+            json={
+                "name": "混合规则",
+                "points": 5,
+                "icon": "book.svg",
+                "target_unit": "week",
+                "week_target": 1,
+                "week_bonus": 2,
+                "streak_weeks": 1,
+                "streak_bonus": 3,
+                "streak_unit": "month",
+            },
+        ).get_json()
+        self.backdate_rule(item["id"], self.monday(6), "deduct")
+        log_day = self.monday(6) + timedelta(days=1)
+        self.deduct_on(item["id"], log_day, times=3)
+        self.settle("week", self.monday(6).isoformat())
+        self.settle("month", log_day.replace(day=1).isoformat())
+        settled = self.streak_records("over_cap_penalty")
+        self.assertEqual([row["amount"] for row in settled], [-4])
+        self.assertEqual([row["amount"] for row in self.streak_records("deduct_month_streak")], [-3])
+
+        # A forced regrade of one unit must not swallow the window another unit already paid.
+        records = self.settle("month", log_day.replace(day=1).isoformat(), force=True)["records"]
+        self.assertEqual([row["amount"] for row in records if row["source"] == "over_cap_penalty"], [-4])
+        self.assertEqual([row["amount"] for row in records if row["source"] == "deduct_month_streak"], [-3])
+
+        records = self.settle("week", self.monday(6).isoformat(), force=True)["records"]
+        self.assertEqual([row["amount"] for row in records if row["source"] == "deduct_month_streak"], [-3])
+
     def test_cap_and_day_count_edits_keep_weekly_rule_anchor(self):
         child = self.create_child()
         self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
