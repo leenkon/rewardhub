@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.8 - 2026-10-18
+
+- docs: 校正 AGENTS.md 的行号引用与代码规模描述 (d162020)
+- docs: AGENTS.md 标注本机没有 make，改用 Makefile 目标的等价命令 (a8c421a)
+
 ## v0.8.7 - 2026-10-18
 
 - fix: 结算发分不再可能把同一个窗口付两次。`records` 上新增部分唯一索引 `records_settlement_once`（账号 + 项目 + 日期 + 来源，只约束那 9 个结算 `source`），补上「连续达标 / 连续扣分」这类没有水位表的发分此前只靠读一遍再写的空档；写侧的 `INSERT` 同步改成 `ON CONFLICT ... DO NOTHING`，索引的 `WHERE` 与冲突目标共用同一个谓词常量，两处拼不一致就当场失效。

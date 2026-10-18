@@ -29,7 +29,7 @@ DATABASE_PATH = Path(os.getenv("DATABASE_PATH") or DATA_DIR / "points.db")
 # Compose forwards "${SECRET_KEY:-}", so an unset value arrives as an empty string rather than missing.
 SECRET_KEY = os.getenv("SECRET_KEY") or "change-this-secret-key-in-production"
 PASSWORD_ITERATIONS = 240_000
-APP_VERSION = "0.8.7"
+APP_VERSION = "0.8.8"
 AVATAR_OPTIONS = {"boy", "girl", "adult-male", "adult-female"}
 CHILD_AVATARS = {"boy", "girl"}
 PROJECT_ICONS = {
