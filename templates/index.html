@@ -177,14 +177,14 @@
 
     <section class="page admin-only" data-page="earn">
        <div class="page-heading"><div><h1>加积分</h1><p class="page-subtitle">当前对象：<strong id="earn-target-name">暂无孩子账号</strong></p></div></div>
-       <div class="feature-form earn-surface"><form class="quick-form quick-entry" data-kind="earn"><select name="item_id" aria-label="选择项目"></select><input name="date" type="date" aria-label="发生日期" required><input name="name" class="quick-note" placeholder="备注（选填）"><input name="points" type="number" min="1" placeholder="积分"><input name="quantity" class="hidden" type="number" min="1" placeholder="数量"><button class="button button-primary" type="submit">确认加积分</button></form></div>
-       <div class="content-panel"><div class="section-heading"><h2>常用加积分项目</h2><span class="muted">点击项目可直接发放</span></div><div class="item-list" id="earn-list"></div></div>
+       <div class="feature-form earn-surface"><form class="quick-form entry-context" data-entry-kind="earn"><input name="date" type="date" aria-label="发生日期" required><input name="name" class="quick-note" placeholder="备注（选填）"></form></div>
+       <div class="content-panel"><div class="section-heading"><h2>常用加积分项目</h2><span class="muted" id="earn-list-hint">点击项目可直接发放</span></div><div class="item-list" id="earn-list"></div></div>
     </section>
 
     <section class="page admin-only" data-page="deduct">
        <div class="page-heading"><div><h1>扣积分</h1><p class="page-subtitle">当前对象：<strong id="deduct-target-name">暂无孩子账号</strong></p></div></div>
-       <div class="feature-form deduct-surface"><form class="quick-form quick-entry" data-kind="deduct"><select name="item_id" aria-label="选择项目"></select><input name="date" type="date" aria-label="发生日期" required><input name="name" class="quick-note" placeholder="备注（选填）"><input name="points" type="number" min="1" placeholder="积分"><button class="button button-danger" type="submit">确认扣积分</button></form></div>
-       <div class="content-panel"><div class="section-heading"><h2>常用扣积分项目</h2><span class="muted">点击项目可直接扣除</span></div><div class="item-list" id="deduct-list"></div></div>
+       <div class="feature-form deduct-surface"><form class="quick-form entry-context" data-entry-kind="deduct"><input name="date" type="date" aria-label="发生日期" required><input name="name" class="quick-note" placeholder="备注（选填）"></form></div>
+       <div class="content-panel"><div class="section-heading"><h2>常用扣积分项目</h2><span class="muted" id="deduct-list-hint">点击项目可直接扣除</span></div><div class="item-list" id="deduct-list"></div></div>
     </section>
 
     <section class="page child-only" data-page="earn">

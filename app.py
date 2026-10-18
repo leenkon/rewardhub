@@ -1257,13 +1257,12 @@ def settlement_periods(unit: str, today: str, settled: set[str]) -> list[dict[st
 
 
 def completion_counts(
-    conn: sqlite3.Connection, account_id: int, kind: str, since_date: str
+    conn: sqlite3.Connection, account_id: int, kind: str, since_date: str | None = None
 ) -> dict[int, dict[str, list[int]]]:
     """Per item and date: [grants, total quantity]. Settlement rows never count."""
-    rows = conn.execute(
-        f"SELECT item_id, date, quantity FROM records WHERE account_id = ? AND {COMPLETION_FILTERS[kind]} AND date >= ?",
-        (account_id, since_date),
-    ).fetchall()
+    clause = "account_id = ? AND " + COMPLETION_FILTERS[kind] + (" AND date >= ?" if since_date else "")
+    args: list[Any] = [account_id, since_date] if since_date else [account_id]
+    rows = conn.execute(f"SELECT item_id, date, quantity FROM records WHERE {clause}", args).fetchall()
     counts: dict[int, dict[str, list[int]]] = {}
     for row in rows:
         per_date = counts.setdefault(int(row["item_id"]), {})
@@ -1377,13 +1376,14 @@ def attach_target_stats(
     for item in items:
         unit, every = item_target(item)
         start = period_start(unit, today, every)
-        windows[item["id"]] = (unit, every, start, period_shift(unit, every, start, 1))
-    counts = completion_counts(conn, int(account_id), kind, min(window[2] for window in windows.values()))
+        windows[item["id"]] = (start, period_shift(unit, every, start, 1))
+    counts = completion_counts(conn, int(account_id), kind)
     for item in items:
         per_date = counts.get(item["id"], {})
-        unit, every, start, until = windows[item["id"]]
-        today_tally = per_date.get(today) or [0, 0]
-        item["today_count"] = today_tally[1] if is_quantity(item) else today_tally[0]
+        start, until = windows[item["id"]]
+        measure = 1 if is_quantity(item) else 0
+        # The badge counts the date picked above the list, and 补录 can name any past day, so keep every day's tally.
+        item["day_counts"] = {day: tally[measure] for day, tally in per_date.items()}
         item["week_count"] = completion_count(item, dates_within(per_date, start, until))
 
 
@@ -1398,24 +1398,19 @@ def rule_items(conn: sqlite3.Connection) -> list[tuple[str, dict[str, Any]]]:
     return found
 
 
-def target_bonus(item: dict[str, Any], tally: int, kind: str) -> tuple[str, int] | None:
+def target_bonus(item: dict[str, Any], tally: int) -> tuple[str, int] | None:
     """Quantity items pay their points once the target is reached plus bonus per full bonus_every above it; count items pay only the overshoot."""
     every = max(int(item["bonus_every"] or 1), 1)
     bonus = int(item["week_bonus"] or 0)
-    over = tally - int(item["week_target"])
+    target = int(item["week_target"])
+    over = tally - target
+    # Which rule paid is carried by the record's source, so titles only name the item and its tally against the target.
+    title = f"{item['name']} {tally}/{target}"
     if is_quantity(item):
-        if over < 0:
-            return None
-        payout = int(item["points"]) + (over // every) * bonus
-        if not payout:
-            return None
-        return f"{item['name']} 数量 {tally}/{item['week_target']}", payout
-    if not bonus or over <= 0:
-        return None
-    times = over // every
-    if not times:
-        return None
-    return f"{item['name']} {'超上限' if kind == 'deduct' else '超额'} {over} 次", times * bonus
+        payout = int(item["points"]) + (over // every) * bonus if over >= 0 else 0
+        return (title, payout) if payout else None
+    times = over // every if bonus and over > 0 else 0
+    return (title, times * bonus) if times else None
 
 
 def add_settlement_record(
@@ -1537,8 +1532,8 @@ def settle_target_window(
         return
     unit, every = item_target(item)
     tally = window_count(item, per_date, start)
-    bonus = target_bonus(item, tally, kind)
     quota = int(item["week_target"])
+    bonus = target_bonus(item, tally)
     shortfall = int(item["week_penalty"]) if tally < quota else 0
     if not bonus and not shortfall:
         return
@@ -1560,7 +1555,7 @@ def settle_target_window(
         add_settlement_record(
             conn,
             account_id,
-            f"{item['name']} 未达标 {tally}/{quota}",
+            f"{item['name']} {tally}/{quota}",
             -shortfall,
             kind,
             item_id,
@@ -1620,7 +1615,7 @@ def settle_earn_streak(
         add_settlement_record(
             conn,
             account_id,
-            f"{item['name']} 连续{'达标' if on_target else '未达标'} {target} 期",
+            f"{item['name']} 连续 {target} 期",
             amount,
             "earn",
             item_id,
@@ -1742,7 +1737,7 @@ def settle_streaks(
                 add_settlement_record(
                     conn,
                     account_id,
-                    f"{item['name']} 连续扣分 {target} {STREAK_PERIOD_TEXT[unit]}",
+                    f"{item['name']} 连续 {target} {STREAK_PERIOD_TEXT[unit]}",
                     -int(item["streak_bonus"]),
                     "deduct",
                     item_id,
@@ -2916,6 +2911,11 @@ def announcement_detail(announcement_id: int):
         return jsonify(state_payload(conn, user))
 
 
+def noted_title(note: str, name: str) -> str:
+    """Hand-written logs keep the note next to the item name; settlement titles stay bare because their source says why."""
+    return f"{name}（{note}）" if note else name
+
+
 @app.post("/api/transactions")
 @require_user
 def create_transaction():
@@ -2943,7 +2943,7 @@ def create_transaction():
             if kind == "earn":
                 item = load_bound_item(conn, "earn", item_id, account_id, "赚取项目")
                 if item is not None:
-                    name, points_value = item["name"], item["points"]
+                    name, points_value = noted_title(name, item["name"]), item["points"]
                     item_kind = "earn"
                 if item is not None and is_quantity(item):
                     # Quantity items only log how much was done; the points arrive when the window closes.
@@ -2955,7 +2955,7 @@ def create_transaction():
             elif kind == "deduct":
                 item = load_bound_item(conn, "deduct", item_id, account_id, "扣取项目")
                 if item is not None:
-                    name, points_value = item["name"], item["points"]
+                    name, points_value = noted_title(name, item["name"]), item["points"]
                     item_kind = "deduct"
                 points = positive_int(points_value)
                 amount = -points
@@ -2963,7 +2963,7 @@ def create_transaction():
             elif kind == "exchange":
                 item = load_bound_item(conn, "reward", item_id, account_id, "兑换奖励")
                 if item is not None:
-                    name, points_value = item["name"], item["points"]
+                    name, points_value = noted_title(name, item["name"]), item["points"]
                     item_kind = "reward"
                 points = positive_int(points_value)
                 charged_points = adjusted_exchange_coins(conn, account_id, points) if user["role"] == "child" else points
@@ -2986,7 +2986,7 @@ def create_transaction():
                     if item is None:
                         raise ValueError("请选择补录项目")
                     item_kind = manual_kind
-                    name = f"补录：{item['name']}（{name}）" if name else f"补录：{item['name']}"
+                    name = f"补录：{noted_title(name, item['name'])}"
                     if manual_kind == "earn" and is_quantity(item):
                         quantity = positive_int(payload.get("quantity"), "数量")
                         amount = 0

@@ -625,6 +625,39 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["total_points"], 10)
 
+    def test_note_keeps_the_item_name_and_marks_a_补录(self):
+        self.create_child()
+        item_id = self.create_item("earn", "阅读", 5)
+        self.assertEqual(
+            self.client.post(
+                "/api/transactions", json={"kind": "earn", "item_id": item_id, "name": "读了课外书"}
+            ).status_code,
+            201,
+        )
+        # The note is what the day list cannot otherwise tell apart from a bare item log.
+        self.assertEqual(self.state()["records"][0]["title"], "阅读（读了课外书）")
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        self.assertEqual(
+            self.manual_entry(item_kind="earn", item_id=item_id, name="漏记了", date=yesterday).status_code,
+            201,
+        )
+        self.assertEqual(self.state()["records"][0]["title"], "补录：阅读（漏记了）")
+        # The entry badge reads the date picked above the list, so a 补录 day carries its own tally.
+        row = self.earn_item_row(item_id)
+        self.assertEqual((row["day_counts"][yesterday], row["day_counts"][date.today().isoformat()]), (1, 1))
+
+    def test_both_entry_lists_carry_the_tally_of_a_backfilled_day(self):
+        self.create_child()
+        earn_id = self.create_item("earn", "整理房间", 4)
+        deduct_id = self.create_item("deduct", "迟到", 5)
+        day = (date.today() - timedelta(days=9)).isoformat()
+        self.client.post("/api/transactions", json={"kind": "earn", "item_id": earn_id, "date": day})
+        self.deduct_on(deduct_id, date.fromisoformat(day))
+        rows = self.state()
+        earn = next(row for row in rows["earn_items"] if row["id"] == earn_id)
+        deduct = next(row for row in rows["deduct_items"] if row["id"] == deduct_id)
+        self.assertEqual((earn["day_counts"][day], deduct["day_counts"][day]), (1, 1))
+
     def test_custom_items_and_manual_history(self):
         self.create_child()
         response = self.client.post("/api/items/earn", json={"name": "整理书桌", "points": 6, "icon": "computer.svg"})
@@ -904,12 +937,13 @@ class PointsManagerApiTests(unittest.TestCase):
             self.assertEqual(self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"]}).status_code, 201)
 
         row = self.earn_item_row(item["id"])
-        self.assertEqual(row["today_count"], 2)
+        self.assertEqual(row["day_counts"][date.today().isoformat()], 2)
         self.assertEqual(row["week_count"], 2)
 
         self.grant(item["id"], weeks_back=1)
         row = self.earn_item_row(item["id"])
-        self.assertEqual(row["today_count"], 2)
+        self.assertEqual(row["day_counts"][(self.monday(1) + timedelta(days=1)).isoformat()], 1)
+        self.assertEqual(row["day_counts"][date.today().isoformat()], 2)
         self.assertEqual(row["week_count"], 2)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -945,7 +979,7 @@ class PointsManagerApiTests(unittest.TestCase):
 
         data = self.settle()
         penalties = [row for row in data["records"] if row["source"] == "weekly_penalty"]
-        self.assertEqual([row["title"] for row in penalties], ["达标项目 未达标 1/5"])
+        self.assertEqual([row["title"] for row in penalties], ["达标项目 1/5"])
         self.assertEqual(data["total_points"], 2 * 5 - 3)
         self.assertEqual([row["week_start"] for row in self.settlement_rows(item["id"])], [self.monday(1).isoformat()])
         self.assertEqual(len(self.settle()["records"]), len(data["records"]))
@@ -1141,7 +1175,7 @@ class PointsManagerApiTests(unittest.TestCase):
         settled = self.settle("quarter")
         self.assertEqual(
             [(row["title"], row["amount"]) for row in settled["records"] if row["source"] == "weekly_bonus"],
-            [("季度项目 超额 1 次", 5)],
+            [("季度项目 3/2", 5)],
         )
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -1156,7 +1190,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.backdate_rule(item["id"], self.monday(1))
         self.grant(item["id"], weeks_back=1, times=4)
         bonuses = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
-        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("间隔项目 超额 3 次", 5)])
+        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("间隔项目 4/1", 5)])
         self.client.delete(f"/api/items/earn/{item['id']}")
 
     def test_target_rule_validates_unit_and_measure(self):
@@ -1230,7 +1264,7 @@ class PointsManagerApiTests(unittest.TestCase):
         settled = self.settle("year")
         self.assertEqual(
             [(row["title"], row["amount"]) for row in settled["records"] if row["source"] == "weekly_bonus"],
-            [("年度项目 超额 2 次", 10)],
+            [("年度项目 4/2", 10)],
         )
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -1257,7 +1291,7 @@ class PointsManagerApiTests(unittest.TestCase):
         settled = self.settle("week", self.monday(1).isoformat())
         self.assertEqual(
             [(row["title"], row["amount"]) for row in settled["records"] if row["source"] == "weekly_bonus"],
-            [("分期项目 超额 1 次", 5)],
+            [("分期项目 2/1", 5)],
         )
         self.assertEqual(
             [(row["week_start"], row["bonus"]) for row in self.settlement_rows(item["id"])],
@@ -1266,7 +1300,7 @@ class PointsManagerApiTests(unittest.TestCase):
         # The streak chain still counts the ungraded window, so its payout lands on the week that completes the run.
         self.assertEqual(
             [(row["title"], row["amount"]) for row in settled["records"] if row["source"] == "target_streak"],
-            [("分期项目 连续达标 2 期", 20)],
+            [("分期项目 连续 2 期", 20)],
         )
         # The picker marks that week settled so the button asks to regrade rather than pay it twice.
         flags = self.settle_flags()
@@ -1279,7 +1313,7 @@ class PointsManagerApiTests(unittest.TestCase):
         settled = self.settle("week", self.monday(2).isoformat())
         self.assertEqual(
             [(row["title"], row["amount"]) for row in settled["records"] if row["source"] == "weekly_bonus"],
-            [("分期项目 超额 1 次", 5), ("分期项目 超额 1 次", 5)],
+            [("分期项目 2/1", 5), ("分期项目 2/1", 5)],
         )
         self.assertEqual(len([row for row in settled["records"] if row["source"] == "target_streak"]), 1)
         self.assertEqual(self.settle_flags()[self.monday(2).isoformat()], (True, True))
@@ -1371,7 +1405,7 @@ class PointsManagerApiTests(unittest.TestCase):
 
         self.settle()
         streaks = self.streak_records("target_streak")
-        self.assertEqual([row["title"] for row in streaks], ["连续项目 连续达标 2 期"])
+        self.assertEqual([row["title"] for row in streaks], ["连续项目 连续 2 期"])
         self.assertEqual(streaks[0]["amount"], 20)
         self.assertEqual(streaks[0]["date"], (self.monday(1) + timedelta(days=6)).isoformat())
         self.assertEqual(len(self.streak_records("target_streak")), 1)
@@ -1401,7 +1435,7 @@ class PointsManagerApiTests(unittest.TestCase):
         # Four straight days pay once at the third day; the fourth day starts the next run.
         self.assertEqual(
             [(row["title"], row["amount"], row["date"]) for row in self.streak_records("target_streak")],
-            [("每日连续 连续达标 3 期", 6, (date.today() - timedelta(days=2)).isoformat())],
+            [("每日连续 连续 3 期", 6, (date.today() - timedelta(days=2)).isoformat())],
         )
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -1471,7 +1505,7 @@ class PointsManagerApiTests(unittest.TestCase):
 
         self.settle()
         payouts = self.streak_records("deduct_week_streak")
-        self.assertEqual([(row["title"], row["amount"], row["type"]) for row in payouts], [("连续迟到 连续扣分 2 周", -5, "expense")])
+        self.assertEqual([(row["title"], row["amount"], row["type"]) for row in payouts], [("连续迟到 连续 2 周", -5, "expense")])
         data = self.state()
         self.assertEqual(data["total_points"], -9)
         self.assertEqual(len(self.streak_records("deduct_week_streak")), 1)
@@ -1507,7 +1541,7 @@ class PointsManagerApiTests(unittest.TestCase):
             self.deduct_on(item["id"], day)
         self.settle("month")
         payouts = self.streak_records("deduct_month_streak")
-        self.assertEqual([(row["title"], row["amount"], row["type"]) for row in payouts], [("月度迟到 连续扣分 2 个月", -5, "expense")])
+        self.assertEqual([(row["title"], row["amount"], row["type"]) for row in payouts], [("月度迟到 连续 2 个月", -5, "expense")])
         self.assertEqual(payouts[0]["date"], app.period_end("month", app.period_shift("month", 1, this_month, -1)))
         self.client.delete(f"/api/items/deduct/{item['id']}")
 
@@ -1540,7 +1574,7 @@ class PointsManagerApiTests(unittest.TestCase):
         charges = [row for row in settled["records"] if row["source"] == "over_cap_penalty"]
         self.assertEqual(
             [(row["title"], row["amount"], row["type"], row["date"]) for row in charges],
-            [("看电视 超上限 1 次", -3, "expense", (self.monday(1) + timedelta(days=6)).isoformat())],
+            [("看电视 3/2", -3, "expense", (self.monday(1) + timedelta(days=6)).isoformat())],
         )
         self.assertEqual(
             [(row["week_start"], row["bonus"], row["penalty"]) for row in self.settlement_rows(item["id"], "deduct")],
@@ -1554,7 +1588,7 @@ class PointsManagerApiTests(unittest.TestCase):
         charges = [row for row in settled["records"] if row["source"] == "over_cap_penalty"]
         self.assertEqual(
             [(row["title"], row["amount"]) for row in charges],
-            [("看电视 超上限 2 次", -6)],
+            [("看电视 4/2", -6)],
         )
         self.assertEqual(settled["total_points"], -14)
         self.client.delete(f"/api/items/deduct/{item['id']}")
@@ -1604,7 +1638,7 @@ class PointsManagerApiTests(unittest.TestCase):
         payouts = self.streak_records("target_streak")
         self.assertEqual(
             [(row["title"], row["amount"], row["type"]) for row in payouts],
-            [("连续缺练 连续未达标 2 期", -5, "expense")],
+            [("连续缺练 连续 2 期", -5, "expense")],
         )
         self.assertEqual(self.state()["total_points"], 2 * 5 - 5)
         self.client.delete(f"/api/items/earn/{item['id']}")
@@ -1661,7 +1695,7 @@ class PointsManagerApiTests(unittest.TestCase):
 
         self.grant(item["id"], weeks_back=0, times=2)
         row = self.earn_item_row(item["id"])
-        self.assertEqual(row["today_count"], 2)
+        self.assertEqual(row["day_counts"][date.today().isoformat()], 2)
         self.assertEqual(row["week_count"], 1)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -1706,7 +1740,7 @@ class PointsManagerApiTests(unittest.TestCase):
         # Logging is points-free; the 27 items pay the 3 completion points plus 2 per full 5 of the 17 above target.
         self.assertEqual([(row["amount"], row["quantity"]) for row in self.earn_logs()], [(0, 20), (0, 7)])
         bonuses = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
-        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("计算题 数量 27/10", 9)])
+        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("计算题 27/10", 9)])
         self.assertEqual(self.state()["total_points"], 9)
         self.assertEqual(len(self.state()["records"]), len(bonuses) + 2)
 
@@ -1731,7 +1765,7 @@ class PointsManagerApiTests(unittest.TestCase):
         bonuses = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
         self.assertEqual(
             [(row["title"], row["amount"]) for row in bonuses],
-            [("英语单词背诵 数量 6/2", 4), ("英语单词背诵 数量 3/2", 2)],
+            [("英语单词背诵 6/2", 4), ("英语单词背诵 3/2", 2)],
         )
         self.assertEqual(self.state()["total_points"], 6)
         self.client.delete(f"/api/items/earn/{item['id']}")
@@ -1745,12 +1779,12 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(self.submit_earn(item["id"], date=day, quantity=3).status_code, 201)
 
         penalties = [row for row in self.settle()["records"] if row["source"] == "weekly_penalty"]
-        self.assertEqual([(row["title"], row["amount"]) for row in penalties], [("练字 未达标 3/10", -5)])
+        self.assertEqual([(row["title"], row["amount"]) for row in penalties], [("练字 3/10", -5)])
 
         day = date.today().isoformat()
         self.assertEqual(self.submit_earn(item["id"], date=day, quantity=4).status_code, 201)
         row = self.earn_item_row(item["id"])
-        self.assertEqual((row["today_count"], row["week_count"]), (4, 4))
+        self.assertEqual((row["day_counts"][day], row["week_count"]), (4, 4))
         self.assertEqual(self.state()["total_points"], -5)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -1767,7 +1801,7 @@ class PointsManagerApiTests(unittest.TestCase):
 
         self.settle()
         payouts = self.streak_records("target_streak")
-        self.assertEqual([(row["title"], row["amount"]) for row in payouts], [("口算本 连续达标 2 期", 6)])
+        self.assertEqual([(row["title"], row["amount"]) for row in payouts], [("口算本 连续 2 期", 6)])
         self.assertEqual(payouts[0]["date"], (self.monday(1) + timedelta(days=6)).isoformat())
         self.assertEqual(len(self.streak_records("target_streak")), 1)
         self.client.delete(f"/api/items/earn/{item['id']}")
@@ -1848,7 +1882,7 @@ class PointsManagerApiTests(unittest.TestCase):
         )
         settled = self.settle()
         bonuses = [row for row in settled["records"] if row["source"] == "weekly_bonus"]
-        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("错题整理 数量 12/10", 3)])
+        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("错题整理 12/10", 3)])
         self.assertEqual(settled["total_points"], 3)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -1863,7 +1897,7 @@ class PointsManagerApiTests(unittest.TestCase):
         settled = self.settle()
         self.assertEqual(
             [(row["title"], row["amount"]) for row in settled["records"] if row["source"] == "weekly_penalty"],
-            [("阅读 未达标 1/2", -3)],
+            [("阅读 1/2", -3)],
         )
         self.assertEqual(settled["total_points"], 2)
 
@@ -1884,7 +1918,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(added.status_code, 201)
         settled = self.settle()
         bonuses = [row for row in settled["records"] if row["source"] == "weekly_bonus"]
-        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("阅读 超额 1 次", 4)])
+        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("阅读 3/2", 4)])
         self.assertEqual(settled["total_points"], 19)
 
         # Undoing that 补录 rolls the window back: the overshoot payout goes with it.
@@ -1913,7 +1947,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(second.status_code, 201)
         settled = self.settle()
         charges = [row for row in settled["records"] if row["source"] == "over_cap_penalty"]
-        self.assertEqual([(row["title"], row["amount"]) for row in charges], [("发脾气 超上限 1 次", -2)])
+        self.assertEqual([(row["title"], row["amount"]) for row in charges], [("发脾气 2/1", -2)])
         self.assertEqual(settled["total_points"], -10)
         self.client.delete(f"/api/items/deduct/{item['id']}")
 

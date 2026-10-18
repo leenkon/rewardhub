@@ -339,8 +339,8 @@ function render() {
   renderLevelBenefits(appState.data);
   renderHomeBroadcasts(appState.data);
   renderAdventureSettings(appState.data);
+  renderEntryContext();
   renderItemLists();
-  renderQuickForms();
   renderManagement();
   renderHomeFlow();
   renderRequests();
@@ -500,17 +500,19 @@ function renderItemList(container, items, kind, mode) {
     return;
   }
   const isExchange = kind === "exchange";
-  const actionText = isExchange ? "申请兑换" : mode === "child" ? "申请" : kind === "earn" ? "加积分" : "扣积分";
+  const tallyDate = mode === "admin" ? entryDate(kind) : localDate();
+  const backdated = mode === "admin" && entryBackdated(kind);
+  const actionText = isExchange ? "申请兑换" : mode === "child" ? "申请" : backdated ? "补录" : kind === "earn" ? "加积分" : "扣积分";
   const actionClass = kind === "deduct" ? "button-danger" : isExchange ? "button-dark" : "button-primary";
   const pointSign = kind === "deduct" || isExchange ? "-" : "+";
   container.innerHTML = items.map((item) => {
     const basePoints = Number(item.base_points || Math.abs(Number(item.points)));
     const actualPoints = Math.abs(Number(item.points));
     const benefitNote = mode === "child" && basePoints !== actualPoints ? `<small class="benefit-note">基础 ${basePoints.toLocaleString("zh-CN")} 积分</small>` : "";
-    const todayCount = Number(item.today_count || 0);
+    const dayCount = Number((item.day_counts || {})[tallyDate] || 0);
     const weekTarget = Number(item.week_target || 0);
     const byQuantity = isQuantityItem(item, kind);
-    const badge = kind === "earn" && todayCount && !byQuantity ? `<small class="count-badge">+${todayCount}</small>` : "";
+    const badge = dayCount ? `<small class="count-badge">${pointSign}${dayCount}</small>` : "";
     const weekNote = weekTarget ? `<span class="week-chip">${targetPeriodText(item, true)} ${Number(item.week_count || 0)}/${weekTarget}</span>` : "";
     const pointsNote = byQuantity ? "" : `<span class="item-points ${kind === "deduct" || isExchange ? "expense" : "income"}">${pointSign}${pointsText(actualPoints)}</span>`;
     const quantityInput = byQuantity ? `<input class="qty-input" type="number" min="1" inputmode="numeric" placeholder="数量" data-qty-for="${item.id}">` : "";
@@ -924,13 +926,29 @@ function renderWeekGrid(container, titleId) {
   if (title) title.textContent = `本周积分（${signed(total)}）`;
 }
 
+// Settlement records title only the item and its tally, so the source carries the reason; other records say it in their title.
+const RECORD_SOURCE_LABEL = {
+  weekly_bonus: "达标奖励",
+  weekly_penalty: "未达标",
+  over_cap_penalty: "超额扣分",
+};
+["day", "week", "month", "quarter", "year"].forEach((unit) => { RECORD_SOURCE_LABEL[`deduct_${unit}_streak`] = "连续扣分"; });
+
+function recordSourceLabel(record) {
+  if (record.source === "target_streak") return Number(record.amount) > 0 ? "连续达标" : "连续未达标";
+  return RECORD_SOURCE_LABEL[record.source] || "";
+}
+
 function renderRecords() {
   const weekGrid = document.getElementById("records-week-grid");
   if (!weekGrid) return;
   renderWeekGrid(weekGrid, "records-week-title");
   document.getElementById("selected-day-title").textContent = `${appState.selectedDate} 每日记录`;
   const records = recordsFor(appState.selectedDate);
-  document.getElementById("day-records").innerHTML = records.length ? records.map((record) => `<div class="record-row"><div><strong>${escapeHtml(record.title)}</strong><span>${escapeHtml(record.time)}</span></div><strong class="record-amount ${record.type}">${entryAmountText(record)}</strong>${appState.data.user.role === "admin" ? `<button class="button button-small button-outline-danger" data-action="undo" data-id="${record.id}" type="button">撤销</button>` : ""}</div>`).join("") : `<div class="empty-state">当日无积分记录</div>`;
+  document.getElementById("day-records").innerHTML = records.length ? records.map((record) => {
+    const label = recordSourceLabel(record);
+    return `<div class="record-row"><div><strong>${escapeHtml(record.title)}</strong>${label ? `<span class="record-source">${label}</span>` : ""}<span>${escapeHtml(record.time)}</span></div><strong class="record-amount ${record.type}">${entryAmountText(record)}</strong>${appState.data.user.role === "admin" ? `<button class="button button-small button-outline-danger" data-action="undo" data-id="${record.id}" type="button">撤销</button>` : ""}</div>`;
+  }).join("") : `<div class="empty-state">当日无积分记录</div>`;
   renderHistory();
 }
 
@@ -1227,32 +1245,31 @@ function renderQuestIconPicker() {
   renderIconGroups(container, document.getElementById("quest-icon-search")?.value || "", document.getElementById("quest-icon")?.value || "", "data-task-icon");
 }
 
-function renderQuickForms() {
-  document.querySelectorAll(".quick-entry").forEach((form) => {
-    const kind = form.dataset.kind;
-    const selected = form.elements.item_id.value;
-    const items = appState.data[`${kind}_items`] || [];
-    const options = items
-      .map((item) => `<option value="${item.id}"${String(item.id) === selected ? " selected" : ""}>${escapeHtml(item.name)}</option>`)
-      .join("");
-    form.elements.item_id.innerHTML = options;
-    // Only bound projects fill the picker, so entry starts on a real project instead of a blank option.
-    if (!items.some((item) => String(item.id) === selected)) form.elements.item_id.value = items[0]?.id ?? "";
-    if (!form.elements.date.value) form.elements.date.value = localDate();
-    form.elements.date.max = localDate();
-    updateQuickForm(form);
-  });
+const ENTRY_HINT = { earn: "点击项目可直接发放", deduct: "点击项目可直接扣除" };
+
+function entryContext(kind) {
+  return document.querySelector(`.entry-context[data-entry-kind="${kind}"]`);
 }
 
-function updateQuickForm(form) {
-  const kind = form.dataset.kind;
-  const item = findItem(kind, form.elements.item_id.value);
-  const quantity = isQuantityItem(item, kind);
-  // A chosen project is scored by its own rules, so the hand-written points field steps aside.
-  form.elements.points.required = !item;
-  if (form.elements.quantity) form.elements.quantity.required = quantity;
-  form.elements.points.classList.toggle("hidden", Boolean(item));
-  if (form.elements.quantity) form.elements.quantity.classList.toggle("hidden", !quantity);
+// Lists without an entry form (child requests) always log today.
+function entryDate(kind) {
+  return entryContext(kind)?.elements.date.value || localDate();
+}
+
+// The date picked above the list decides whether a click logs today's entry or back-dates a 补录.
+function entryBackdated(kind) {
+  return entryDate(kind) !== localDate();
+}
+
+function renderEntryContext() {
+  ["earn", "deduct"].forEach((kind) => {
+    const form = entryContext(kind);
+    if (!form) return;
+    if (!form.elements.date.value) form.elements.date.value = localDate();
+    form.elements.date.max = localDate();
+    const hint = document.getElementById(`${kind}-list-hint`);
+    if (hint) hint.textContent = entryBackdated(kind) ? `点击项目补录到 ${form.elements.date.value}` : ENTRY_HINT[kind];
+  });
 }
 
 function fillAvatarOptions(role, selected = "") {
@@ -1454,7 +1471,14 @@ async function handleOperation(kind, id, source = null) {
   const item = findItem(kind, id);
   const points = Math.abs(Number(item?.points));
   if (!Number.isInteger(points) || points <= 0) throw new Error("该项目暂不可用");
-  const payload = { kind, name: item.name, points, item_id: item.id };
+  // Only the admin lists own the date and note above them; a child's request always logs today.
+  const context = kind === "exchange" || appState.data?.user?.role === "child" ? null : entryContext(kind);
+  const note = context ? context.elements.name.value.trim() : "";
+  // A past date above the list turns the click into a 补录: the backend scores it by the item's rules and reopens its windows.
+  const backdated = Boolean(context) && entryBackdated(kind);
+  const payload = backdated
+    ? { kind: "manual", item_kind: kind, name: note, item_id: item.id, date: context.elements.date.value }
+    : { kind, name: note, points, item_id: item.id };
   if (isQuantityItem(item, kind)) {
     const quantity = Number(source?.closest(".list-row")?.querySelector(".qty-input")?.value);
     if (!Number.isInteger(quantity) || quantity <= 0) throw new Error("请输入数量");
@@ -1466,8 +1490,9 @@ async function handleOperation(kind, id, source = null) {
   }
   const result = await api("/api/transactions", { method: "POST", body: JSON.stringify(payload) });
   appState.data = result;
+  if (context) context.elements.name.value = "";
   render();
-  showToast(result.request_submitted ? "申请已提交，等待审核" : kind === "earn" ? "已加积分" : kind === "exchange" ? "兑换已提交，等待审核" : "已扣积分");
+  showToast(result.request_submitted ? "申请已提交，等待审核" : backdated ? "已补录并重算" : kind === "earn" ? "已加积分" : kind === "exchange" ? "兑换已提交，等待审核" : "已扣积分");
 }
 
 async function saveEditor(event) {
@@ -1565,30 +1590,15 @@ async function handleTaskAction(action, id) {
   } catch (error) { showToast(error.message); }
 }
 
-async function saveQuickForm(event) {
+async function saveEarnRequest(event) {
   // The listener is delegated on document, so currentTarget is document rather than the form.
   const form = event.target;
-  const kind = form.dataset.kind;
-  const name = form.elements.name.value.trim();
-  const date = form.elements.date?.value || localDate();
-  const item = findItem(kind, form.elements.item_id?.value);
-  let payload;
-  if (item) {
-    // A project log dated before today is a 补录: the backend scores it by the item's rules and recomputes its windows.
-    payload = date === localDate() ? { kind, item_id: item.id, name } : { kind: "manual", item_kind: kind, item_id: item.id, name, date };
-    if (isQuantityItem(item, kind)) payload.quantity = Number(form.elements.quantity.value);
-  } else {
-    payload = { kind, name, points: Number(form.elements.points.value), date };
-  }
-  const kept = { item: form.elements.item_id?.value || "", date: form.elements.date?.value || "" };
+  const payload = { kind: form.dataset.kind, name: form.elements.name.value.trim(), points: Number(form.elements.points.value) };
   const result = await api("/api/transactions", { method: "POST", body: JSON.stringify(payload) });
   appState.data = result;
   form.reset();
-  // Keep the project and date so repeated entries for the same day need no re-picking.
-  if (form.elements.item_id) form.elements.item_id.value = kept.item;
-  if (form.elements.date) form.elements.date.value = kept.date;
   render();
-  showToast(result.request_submitted ? "申请已提交，等待审核" : payload.kind === "manual" ? "已补录并重算" : kind === "earn" ? "已加积分" : "已扣积分");
+  showToast(result.request_submitted ? "申请已提交，等待审核" : "已加积分");
 }
 
 async function deleteItem(kind, id) {
@@ -1716,7 +1726,7 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("submit", async (event) => {
   if (event.target.matches("form[data-kind]")) {
     event.preventDefault();
-    try { await saveQuickForm(event); } catch (error) { showToast(error.message); }
+    try { await saveEarnRequest(event); } catch (error) { showToast(error.message); }
   }
 });
 
@@ -1805,7 +1815,7 @@ document.getElementById("back-to-login").addEventListener("click", showLogin);
 document.getElementById("account-form").elements.role.addEventListener("change", (event) => fillAvatarOptions(event.target.value));
 document.getElementById("score-rule-fields").elements.target_measure.addEventListener("change", updateRuleUI);
 document.getElementById("score-rule-fields").elements.streak_bonus.addEventListener("input", updateRuleUI);
-document.querySelectorAll(".quick-entry select").forEach((select) => select.addEventListener("change", (event) => updateQuickForm(event.target.closest("form"))));
+document.querySelectorAll(".entry-context input[name='date']").forEach((input) => input.addEventListener("change", () => { renderEntryContext(); renderItemLists(); }));
 document.getElementById("adventure-level-form")?.elements.mode.addEventListener("change", (event) => {
   const level = document.getElementById("adventure-level-form")?.elements.level;
   if (level) level.disabled = event.target.value !== "manual";
