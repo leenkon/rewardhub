@@ -8,7 +8,7 @@
 
 - RewardHub（中文名「带娃神器」）：家庭积分管理工具，Flask 单文件后端 + 无构建步骤的原生 JS 单页前端。
 - 唯一运行时依赖是 `Flask==3.1.1`（`requirements.txt`）；数据库用标准库 `sqlite3`，无 ORM、无前端框架、无打包器。
-- 主代码集中在四个文件：`app.py`（约 3500 行，路由 + 表结构 + 结算逻辑）、`static/app.js`（约 1900 行，全部前端逻辑）、`templates/index.html`（SPA 外壳）、`tests/test_app.py`（单测套件）。
+- 主代码集中在四个文件：`app.py`（约 3470 行，路由 + 表结构 + 结算逻辑）、`static/app.js`（约 1880 行，全部前端逻辑）、`templates/index.html`（SPA 外壳，约 300 行）、`tests/test_app.py`（单测套件，约 2380 行）。
 - 本机解释器是 Python 3.14，CI 用 3.12（`.github/workflows/publish-image.yml`），改动必须在 3.12 上可运行。
 
 ### 架构与核心文件
@@ -49,7 +49,7 @@ make binary / make binary-package        # PyInstaller 打包，见 BINARY_DEPLO
 ### 代码风格与约定
 
 - Python：文件头 `from __future__ import annotations`，函数带类型标注。可复用的 SQL 片段和文案提成模块级常量字典（`ITEM_TABLES`、`CAP_PERIOD_LABELS`、`SETTLEMENT_SOURCE_PREDICATE`），避免同一谓词在两处各写一遍。注释只写非显然的「为什么」（例如为什么索引 WHERE 必须和 upsert 冲突目标文本一致），不写代码在做什么。
-- 报错：API 统一 `return api_error("中文提示", 状态码)`（`app.py:2311`）；前端直接把 `error` 字段弹给用户，所以提示要可执行、是中文、不泄露堆栈。
+- 报错：API 统一 `return api_error("中文提示", 状态码)`（`app.py:2293`）；前端直接把 `error` 字段弹给用户，所以提示要可执行、是中文、不泄露堆栈。
 - 用户可见文案：标签 2-3 字，说明不复述标题，按钮去掉冗余动词，但保留功能术语。界面已于 2026-10-12 定稿冻结——不主动提改版，改动只限用户点名的控件。全新库的加/扣/兑换项目表必须为空，不要重新引入默认项目或示例数据。
 - 前端：函数命名沿用 `render*` / `handle*` / `api`；字符串用双引号；列表重排用 ⠿ 手柄 + pointer 事件；下拉只列当前真实可用的候选项。
 - 测试：`unittest`。`setUpModule()` 先在临时目录设好 `DATA_DIR` / `DATABASE_PATH` 才 `import app`——任何要碰库的用例都必须照这个顺序，否则 import 期的 `init_db()` 会写到真实库。规则类改动要同时补结算与角标断言，并把测试条数变化写进 CHANGELOG。
