@@ -345,7 +345,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.create_child(username="child", display_name="小朋友")
         earn_id = self.create_item("earn", "完成作业", 10)
         state = self.state()
-        self.assertEqual(state["version"], "0.8.6")
+        self.assertEqual(state["version"], "0.8.7")
         self.assertEqual(state["user"]["avatar"], "adult-male")
         self.assertEqual(state["active_child"]["avatar"], "boy")
 
