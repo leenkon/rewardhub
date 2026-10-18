@@ -35,13 +35,14 @@
 pip install -r requirements.txt          # 运行时依赖
 python app.py                            # 本地起服务，默认 http://127.0.0.1:9696
 python -m unittest discover -s tests -q  # 单测，当前 78 条，必须全绿
-make test                                # 同上
-make check                               # 单测 + python -m py_compile app.py + git diff --check
+python -m py_compile app.py              # 语法检查
+git diff --check                         # 空白检查（make check = 上面三条 + 单测）
 make release VERSION=x.y.z               # check → bump-version → changelog → check
 make next-version                        # 只算下一版本号，勿手改版本标记
 make binary / make binary-package        # PyInstaller 打包，见 BINARY_DEPLOYMENT.md
 ```
 
+- 本机 PATH 里没有 `make`（只有 `git` 和 `python`），`Makefile` 的目标主要在 CI 里跑；本地按其等价命令执行即可。
 - 没有 pytest 配置，别引入新测试框架；`make next-version` 输出非法时 CI 会直接失败。
 - 版本标记只有三处（`app.py`、README「当前版本」、`tests/test_app.py` 里的断言），由 `scripts/release.py bump-version` 统一写，不要手改、不要在别处复制版本解析逻辑。
 
