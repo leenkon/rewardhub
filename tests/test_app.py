@@ -2325,6 +2325,27 @@ class PointsManagerApiTests(unittest.TestCase):
         self.client.post("/api/auth/login", json={"username": "kid-export", "password": "child123"})
         self.assertEqual(self.client.post("/api/targets/export", json=payload).status_code, 403)
 
+    def test_target_sheet_columns_fit_their_content(self):
+        # Column widths and row heights used to be hardcoded, so a long item name wrapped into a row too short to show it.
+        sheet_namespace = "{%s}" % self.app_module.SHEET_NS
+        long_name = "阅读课外书" * 8
+        payload = {
+            "unit": "week",
+            "date": date.today().isoformat(),
+            "range": "本周 10/19 ~ 10/25",
+            "heads": [["项目", "目标", "一"], ["", "", "10/19"]],
+            "sheets": [{"name": "小明", "rows": [[long_name, "每周数量10次"], ["口算", "每天1次"]]}],
+        }
+        archive = zipfile.ZipFile(io.BytesIO(self.client.post("/api/targets/export", json=payload).data))
+        sheet = ElementTree.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        widths = {element.get("min"): float(element.get("width")) for element in sheet.iter(sheet_namespace + "col")}
+        heights = {element.get("r"): float(element.get("ht")) for element in sheet.iter(sheet_namespace + "row") if element.get("ht")}
+
+        self.assertEqual(widths["1"], self.app_module.XLSX_NAME_BOUNDS[1])
+        self.assertGreaterEqual(widths["3"], self.app_module.xlsx_display_width("10/19"))
+        self.assertGreater(heights["4"], heights["5"])
+        self.assertEqual(next(sheet.iter(sheet_namespace + "tabColor")).get("rgb"), "FF24A37B")
+
     def test_target_sheet_export_survives_untypeable_characters(self):
         # Item names and nicknames arrive from the browser, and XML 1.0 refuses to carry the control codes a paste can bring with them.
         payload = {

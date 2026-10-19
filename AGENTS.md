@@ -8,7 +8,7 @@
 
 - RewardHub（中文名「带娃神器」）：家庭积分管理工具，Flask 单文件后端 + 无构建步骤的原生 JS 单页前端。
 - 唯一运行时依赖是 `Flask==3.1.1`（`requirements.txt`）；数据库用标准库 `sqlite3`，无 ORM、无前端框架、无打包器。
-- 主代码集中在四个文件：`app.py`（约 3820 行，路由 + 表结构 + 结算逻辑）、`static/app.js`（约 2065 行，全部前端逻辑）、`templates/index.html`（SPA 外壳，约 310 行）、`tests/test_app.py`（单测套件，约 2510 行）。
+- 主代码集中在四个文件：`app.py`（约 3850 行，路由 + 表结构 + 结算逻辑）、`static/app.js`（约 2075 行，全部前端逻辑）、`templates/index.html`（SPA 外壳，约 310 行）、`tests/test_app.py`（单测套件，约 2530 行）。
 - 本机解释器是 Python 3.14，CI 用 3.12（`.github/workflows/publish-image.yml`），改动必须在 3.12 上可运行。
 
 ### 架构与核心文件
@@ -17,7 +17,7 @@
 - 数据层：裸 SQL。`connection()`（`app.py:214`）是每请求的上下文管理器，负责 `row_factory = sqlite3.Row` 和 `PRAGMA foreign_keys = ON`；建表与升级全在 `init_db()`（`app.py:486`）里——`CREATE TABLE IF NOT EXISTS` 加 `migrate_*()` / `ensure_*()` 幂等补列补索引，模块末尾在 import 时执行 `init_db()`。
 - 结算：`AUTO_SETTLEMENT_SOURCES`（`app.py:186`）列出 9 个结算 `source`，分为「目标窗口族」（`weekly_bonus` / `weekly_penalty` / `target_streak` / `over_cap_penalty`，有 `weekly_settlements` 水位表）与「连续扣分族」（`deduct_{day,week,month,quarter,year}_streak`，无水位、靠 `records_settlement_once` 部分唯一索引兜底）。哪些记录参与计数由 `EARN_COMPLETION_FILTER` / `DEDUCT_COMPLETION_FILTER`（`app.py:166`）决定；只有「天」档随页面实时结算，其余档位靠首页「手动结算」。
 - 认证与会话：`password_hash()` 用 PBKDF2-HMAC-SHA256 240k 迭代；`require_admin` / `current_user()` / `active_child_id()` 构成角色门控，孩子只能看到自己与被绑定的项目。没设 `SECRET_KEY` 时 `generated_secret_key()` 首次启动随机生成一份、存成 `DATA_DIR/secret_key`——源码里不留固定密钥，否则任何人都能签出管理员 cookie（升级后所有人要重新登录一次）。
-- 前端：单个 `appState` 全局对象 + 逐面板 `renderX()` 重绘；`api()`（`static/app.js:188`）封装 fetch 并把 `payload.error` 抛成 `Error`；所有拼进 `innerHTML` 的值必须过 `escapeHtml()`。
+- 前端：单个 `appState` 全局对象 + 逐面板 `renderX()` 重绘；`api()`（`static/app.js:193`）封装 fetch 并把 `payload.error` 抛成 `Error`；所有拼进 `innerHTML` 的值必须过 `escapeHtml()`；周窗口一律从 `mondayOf()`（`static/app.js:81`）起算，别再各自 `getDay() || 7`。三条在途/竞态约束别回退：委托点击监听先置灰被点的按钮、`finally` 恢复（双击不会重复提交）；`loadAnalytics()` 靠自增的 `analyticsRequestId` 丢弃过期响应；`appState.settlePeriodUnit` 标记期次下拉属于哪个单位，与 `#settle-unit` 对不上时 `syncSettleRun()` 禁用结算。
 - 版本与缓存：`APP_VERSION`（`app.py:55`）是版本号单一来源，`templates/index.html` 把它作为所有静态资源的 `?v=` 缓存串——不 bump 版本号，客户端会继续用旧 JS/CSS。
 
 ### 关键配置文件
@@ -34,7 +34,7 @@
 ```bash
 pip install -r requirements.txt          # 运行时依赖
 python app.py                            # 本地起服务，默认 http://127.0.0.1:9696
-python -m unittest discover -s tests -q  # 单测，当前 84 条，必须全绿
+python -m unittest discover -s tests -q  # 单测，当前 85 条，必须全绿
 python -m py_compile app.py              # 语法检查
 git diff --check                         # 空白检查（make check = 上面三条 + 单测）
 make release VERSION=x.y.z               # check → bump-version → changelog → check
@@ -50,7 +50,7 @@ make binary / make binary-package        # PyInstaller 打包，见 BINARY_DEPLO
 
 - Python：文件头 `from __future__ import annotations`，函数带类型标注。可复用的 SQL 片段和文案提成模块级常量字典（`ITEM_TABLES`、`CAP_PERIOD_LABELS`、`SETTLEMENT_SOURCE_PREDICATE`），避免同一谓词在两处各写一遍。注释只写非显然的「为什么」（例如为什么索引 WHERE 必须和 upsert 冲突目标文本一致），不写代码在做什么。
 - 报错：API 统一 `return api_error("中文提示", 状态码)`（`app.py:2608`）；前端直接把 `error` 字段弹给用户，所以提示要可执行、是中文、不泄露堆栈。Python 自己的英文原文（`int()` 那种）也算泄露，数字字段一律走 `positive_int` / `non_negative_int` / `signed_int`，它们共用 `int_field()` 的整数与 2^63 上限校验。
-- 文件导出：页面已经渲染好的东西（目标表）由前端把措辞与列结构随请求交给后端，后端只用 `xlsx_workbook()` 写工作簿——标准库 `zipfile` 手写最小 OOXML，不为此新增依赖，也不要用 Python 复写一遍周期与文案口径；下载文件名以服务端 `Content-Disposition` 为准。
+- 文件导出：页面已经渲染好的东西（目标表）由前端把措辞与列结构随请求交给后端，后端只用 `xlsx_workbook()` 写工作簿——标准库 `zipfile` 手写最小 OOXML，不为此新增依赖，也不要用 Python 复写一遍周期与文案口径；下载文件名以服务端 `Content-Disposition` 为准。列宽与行高一律按内容算（`xlsx_auto_width()` / `xlsx_line_count()`，中日韩字符按两格估宽）——内容长度只有前端知道，写死宽度会让项目名折进固定行高被裁掉；WPS 不会像 Excel 那样自己撑高换行的行，`ht` + `customHeight` 必须显式写。
 - 用户可见文案：标签 2-3 字，说明不复述标题，按钮去掉冗余动词，但保留功能术语。界面已于 2026-10-12 定稿冻结——不主动提改版，改动只限用户点名的控件。全新库的加/扣/兑换项目表必须为空，不要重新引入默认项目或示例数据。
 - 前端：函数命名沿用 `render*` / `handle*` / `api`；字符串用双引号；列表重排用 ⠿ 手柄 + pointer 事件；下拉只列当前真实可用的候选项。
 - 测试：`unittest`。`setUpModule()` 先在临时目录设好 `DATA_DIR` / `DATABASE_PATH` 才 `import app`——任何要碰库的用例都必须照这个顺序，否则 import 期的 `init_db()` 会写到真实库。规则类改动要同时补结算与角标断言，并把测试条数变化写进 CHANGELOG。

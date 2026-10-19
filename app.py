@@ -2169,13 +2169,14 @@ XLSX_STYLES = (
     '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
     '<cellXfs count="5">'
     '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
-    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">'
+    '<alignment horizontal="center" vertical="center"/></xf>'
     '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
     '<alignment horizontal="center" vertical="center" wrapText="1"/></xf>'
     '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1">'
     '<alignment horizontal="left" vertical="center" wrapText="1"/></xf>'
     '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1">'
-    '<alignment horizontal="center" vertical="center"/></xf>'
+    '<alignment horizontal="center" vertical="center" wrapText="1"/></xf>'
     "</cellXfs>"
     '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
     "</styleSheet>"
@@ -2194,32 +2195,60 @@ def xlsx_text_cell(ref: str, text: str, style: int) -> str:
     return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{escape(XML_CONTROL_CHARS.sub("", text))}</t></is></c>'
 
 
+XLSX_CELL_PADDING = 1.5  # the border and cursor room Excel keeps away from a cell's text
+# The lower bounds keep the boxes writable and the upper ones stop one long item name from stretching the whole sheet.
+XLSX_NAME_BOUNDS = (18.0, 34.0)
+XLSX_GOAL_BOUNDS = (9.0, 16.0)
+XLSX_BOX_BOUNDS = (6.0, 8.0)
+XLSX_BODY_HEIGHT_BASE = 26.0
+XLSX_BODY_LINE_HEIGHT = 15.0
+
+
+def xlsx_display_width(text: str) -> float:
+    """Excel sizes a column in default-font "0" glyphs, so CJK, Hangul and fullwidth punctuation count as two."""
+    return sum(2 if 0x2E80 <= ord(ch) <= 0xFF60 else 1 for ch in text)
+
+
+def xlsx_auto_width(texts: list[str], bounds: tuple[float, float]) -> float:
+    widest = max((xlsx_display_width(text) for text in texts), default=0) + XLSX_CELL_PADDING
+    return round(min(max(widest, bounds[0]), bounds[1]), 1)
+
+
+def xlsx_line_count(text: str, width: float) -> int:
+    return max(1, math.ceil(xlsx_display_width(text) / max(width - XLSX_CELL_PADDING, 1)))
+
+
 def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) -> str:
     """Merged title band, two frozen head rows, then one bordered box per unit for handwriting."""
     columns = len(heads[0])
     last_column = xlsx_column(columns)
     body_start = len(heads) + 2
+    name_width = xlsx_auto_width([row[0] for row in rows], XLSX_NAME_BOUNDS)
+    goal_width = xlsx_auto_width([row[1] for row in rows], XLSX_GOAL_BOUNDS)
+    box_width = xlsx_auto_width([cell for head in heads for cell in head[2:]], XLSX_BOX_BOUNDS)
     lines = [f'<row r="1" ht="22" customHeight="1">{xlsx_text_cell("A1", title, 1)}</row>']
     for index, head in enumerate(heads, start=2):
         cells = "".join(xlsx_text_cell(f"{xlsx_column(column)}{index}", text, 2) for column, text in enumerate(head, start=1))
         lines.append(f'<row r="{index}" ht="16" customHeight="1">{cells}</row>')
     for offset, row in enumerate(rows):
         index = body_start + offset
+        wrapped_lines = max(xlsx_line_count(row[0], name_width), xlsx_line_count(row[1], goal_width))
+        height = XLSX_BODY_HEIGHT_BASE + XLSX_BODY_LINE_HEIGHT * (wrapped_lines - 1)
         boxes = "".join(f'<c r="{xlsx_column(column)}{index}" s="4"/>' for column in range(3, columns + 1))
         lines.append(
-            f'<row r="{index}" ht="26" customHeight="1">'
+            f'<row r="{index}" ht="{height:g}" customHeight="1">'
             f'{xlsx_text_cell(f"A{index}", row[0], 3)}{xlsx_text_cell(f"B{index}", row[1], 4)}{boxes}</row>'
         )
     return (
         f"{XML_HEADER}<worksheet xmlns=\"{SHEET_NS}\">"
-        "<sheetPr><pageSetUpPr fitToPage=\"1\"/></sheetPr>"
+        '<sheetPr><tabColor rgb="FF24A37B"/><pageSetUpPr fitToPage="1"/></sheetPr>'
         f'<dimension ref="A1:{last_column}{body_start + len(rows) - 1}"/>'
         f'<sheetViews><sheetView showGridLines="0" workbookViewId="0">'
         f'<pane xSplit="2" ySplit="{body_start - 1}" topLeftCell="C{body_start}" activePane="bottomRight" state="frozen"/>'
         "</sheetView></sheetViews>"
         '<sheetFormatPr defaultRowHeight="15"/>'
-        f'<cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="9" customWidth="1"/>'
-        f'<col min="3" max="{columns}" width="4.4" customWidth="1"/></cols>'
+        f'<cols><col min="1" max="1" width="{name_width:g}" customWidth="1"/><col min="2" max="2" width="{goal_width:g}" customWidth="1"/>'
+        f'<col min="3" max="{columns}" width="{box_width:g}" customWidth="1"/></cols>'
         f'<sheetData>{"".join(lines)}</sheetData>'
         f'<mergeCells count="1"><mergeCell ref="A1:{last_column}1"/></mergeCells>'
         '<printOptions horizontalCentered="1"/>'
