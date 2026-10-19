@@ -117,7 +117,7 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .control-panel { background: var(--tint); }
 .button-row, .row-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .button-row select { width: auto; margin: 0; font-size: 13px; }
-.button:disabled { opacity: .45; cursor: not-allowed; }
+.button:disabled, .chip-button:disabled { opacity: .45; cursor: not-allowed; }
 .button:disabled:hover { filter: none; }
 .table-scroll { width: 100%; overflow-x: auto; }
 .management-table { width: 100%; min-width: 690px; border-collapse: collapse; font-size: 13px; }
@@ -471,7 +471,7 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .home-flow-total.income { color: var(--green-dark); background: var(--green-soft); }
 .home-flow-total.expense { color: var(--red-dark); background: var(--red-soft); }
 .flow-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
-.flow-column, .flow-pair > section { min-width: 0; }
+.flow-column { min-width: 0; }
 .flow-title { margin: 0 0 9px; font-size: 13px; font-weight: 850; }
 .flow-list { display: grid; gap: 7px; }
 .flow-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-height: 30px; padding: 5px 9px; background: var(--tint); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
@@ -550,6 +550,8 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
   .hero-identity, .hero-balance, .hero-actions { grid-column: 1 / -1; }
   .hero-balance { padding: 16px 0 0; border-top: 1px solid rgba(255,255,255,.22); border-left: 0; }
   .management-table { min-width: 760px; }
+  /* The period matrix carries .management-table too, so this has to come after it to win. */
+  .period-table { min-width: 0; }
   .no-child-panel { align-items: flex-start; flex-direction: column; }
   .control-center-stats { grid-column: 1 / -1; grid-template-columns: repeat(3, 1fr); }
   .overview-control-grid { grid-template-columns: minmax(0, 1fr) minmax(180px, .72fr); }

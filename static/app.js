@@ -17,6 +17,7 @@ const appState = {
   analyticsUnit: "week",
   analyticsPeriods: 8,
   analyticsKind: "earn",
+  settlePeriodUnit: "",
 };
 
 let confirmResolver = null;
@@ -74,6 +75,13 @@ function localDate(date = new Date()) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+// Every weekly window starts on Monday; getDay() counts Sunday as 0, hence the || 7.
+function mondayOf(date) {
+  const monday = new Date(date);
+  monday.setDate(date.getDate() - (date.getDay() || 7) + 1);
+  return monday;
 }
 
 function escapeHtml(value) {
@@ -176,13 +184,10 @@ function levelBenefitText() {
   return "赚积分 +" + earnBonus + "% · 兑换省 " + exchangeDiscount + "%";
 }
 
-function effectiveItemPoints(points, kind, mode) {
-  const value = Math.abs(Number(points) || 0);
-  if (mode !== "child") return value;
-  const gamification = appState.data?.gamification || {};
-  if (kind === "earn") return Math.max(1, Math.ceil(value * (1 + Number(gamification.earn_bonus_percent || 0) / 100)));
-  if (kind === "exchange") return Math.max(1, Math.floor(value * (1 - Number(gamification.exchange_discount_percent || 0) / 100)));
-  return value;
+// The cash-exchange panel is child-only, and list rows already carry the server-side bonus, so this is the one preview the client owns.
+function discountedExchangePoints(points) {
+  const discount = Number(appState.data?.gamification?.exchange_discount_percent || 0);
+  return Math.max(1, Math.floor(points * (1 - discount / 100)));
 }
 
 async function api(url, options = {}) {
@@ -284,8 +289,10 @@ function updateAccountUi() {
 }
 
 function syncSettleRun() {
+  const unit = document.getElementById("settle-unit");
   const option = document.getElementById("settle-period").selectedOptions[0];
-  document.getElementById("settle-run").disabled = option?.dataset.closed !== "1";
+  // settlePeriodUnit is the unit the on-screen list really belongs to, so a reload in flight or a failed one keeps 结算 unreachable.
+  document.getElementById("settle-run").disabled = unit.value !== appState.settlePeriodUnit || option?.dataset.closed !== "1";
 }
 
 async function loadSettlePeriods() {
@@ -293,18 +300,20 @@ async function loadSettlePeriods() {
   const select = document.getElementById("settle-period");
   // Reloads after a settle run too, so keep the period the admin was looking at.
   const previous = select.value;
-  appState.settlePeriodUnit = unit;
+  syncSettleRun();
   try {
     const data = await api(`/api/settlements/periods?unit=${encodeURIComponent(unit)}`);
     select.innerHTML = data.periods
       .map((row) => `<option value="${row.start}" data-closed="${row.closed ? 1 : 0}" data-settled="${row.settled ? 1 : 0}">${escapeHtml(row.label)}${row.closed ? (row.settled ? "（已结算）" : "") : "（未结束）"}</option>`)
       .join("");
     if (data.periods.some((row) => row.start === previous)) select.value = previous;
-    syncSettleRun();
+    appState.settlePeriodUnit = unit;
   } catch (error) {
+    select.innerHTML = "";
     appState.settlePeriodUnit = "";
     showToast(error.message);
   }
+  syncSettleRun();
 }
 
 function navigate(page) {
@@ -378,10 +387,10 @@ function renderHome() {
   const expense = Math.abs(todayRecords.filter((record) => record.type === "expense").reduce((sum, record) => sum + Number(record.amount), 0));
   const children = (data.account_overview || []).filter((item) => item.role === "child");
   const pending = children.reduce((sum, item) => sum + Number(item.pending_count), 0);
+  const monday = mondayOf(new Date());
   const weekTotal = dayNames.reduce((sum, _, index) => {
-    const current = new Date();
-    const day = current.getDay() || 7;
-    current.setDate(current.getDate() - day + index + 1);
+    const current = new Date(monday);
+    current.setDate(monday.getDate() + index);
     return sum + dayTotal(localDate(current));
   }, 0);
   setImageSource(
@@ -919,9 +928,7 @@ function renderAccounts() {
 
 function renderWeekGrid(container, titleId) {
   if (!container) return;
-  const monday = new Date();
-  const day = monday.getDay() || 7;
-  monday.setDate(monday.getDate() - day + 1);
+  const monday = mondayOf(new Date());
   let total = 0;
   container.innerHTML = dayNames.map((dayName, index) => {
     const current = new Date(monday);
@@ -1181,7 +1188,11 @@ function renderAnalytics() {
   renderItemPeriods(data);
 }
 
+// Switching range, unit, scope or page fires overlapping requests; only the newest one may draw the matrix.
+let analyticsRequestId = 0;
+
 async function loadAnalytics() {
+  const requestId = ++analyticsRequestId;
   const days = Number(document.getElementById("analytics-range")?.value || 30);
   const params = new URLSearchParams({
     days: String(days),
@@ -1191,7 +1202,9 @@ async function loadAnalytics() {
   if (appState.data.user.role === "admin" && appState.analyticsScope && appState.analyticsScope !== "all") {
     params.set("account_id", appState.analyticsScope);
   }
-  appState.analytics = await api(`/api/analytics?${params.toString()}`);
+  const data = await api(`/api/analytics?${params.toString()}`);
+  if (requestId !== analyticsRequestId) return;
+  appState.analytics = data;
   renderAnalytics();
 }
 
@@ -1222,8 +1235,7 @@ function periodAnchors(unit, day) {
     const first = Math.floor(date.getMonth() / 3) * 3;
     return { start: new Date(date.getFullYear(), first, 1), end: new Date(date.getFullYear(), first + 3, 0) };
   }
-  const monday = new Date(date);
-  monday.setDate(date.getDate() - (date.getDay() || 7) + 1);
+  const monday = mondayOf(date);
   return { start: monday, end: new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6) };
 }
 
@@ -1572,7 +1584,7 @@ function updateCashExchangePreview() {
   const preview = document.getElementById("cash-exchange-preview");
   if (!input || !preview) return;
   const basePoints = Math.max(0, Number(input.value) || 0);
-  const chargedPoints = basePoints > 0 ? effectiveItemPoints(basePoints, "exchange", "child") : 0;
+  const chargedPoints = basePoints > 0 ? discountedExchangePoints(basePoints) : 0;
   const savedPoints = Math.max(0, basePoints - chargedPoints);
   const note = savedPoints > 0
     ? `实际扣除 ${chargedPoints.toLocaleString("zh-CN")} 积分（原需 ${basePoints.toLocaleString("zh-CN")}，省 ${savedPoints.toLocaleString("zh-CN")}）`
@@ -1858,7 +1870,9 @@ document.addEventListener("click", async (event) => {
   const closeTarget = event.target.closest("[data-close-modal]");
   if (closeTarget) { closeModal(); return; }
   const action = event.target.closest("[data-action]");
-  if (!action) return;
+  if (!action || action.disabled) return;
+  // A second click while the first request is still in flight would post the same transaction twice.
+  action.disabled = true;
   try {
     if (["earn", "deduct", "exchange"].includes(action.dataset.action)) await handleOperation(action.dataset.action, Number(action.dataset.id), action);
     if (action.dataset.action === "edit") openEditor(action.dataset.kind, Number(action.dataset.id));
@@ -1877,7 +1891,7 @@ document.addEventListener("click", async (event) => {
     if (action.dataset.action === "edit-announcement") openAnnouncementEdit(Number(action.dataset.id));
     if (action.dataset.action === "delete-announcement") await deleteAnnouncement(Number(action.dataset.id));
     if (action.dataset.action === "undo") await undoRecord(Number(action.dataset.id));
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message); } finally { action.disabled = false; }
 });
 
 document.addEventListener("submit", async (event) => {
