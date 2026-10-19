@@ -238,7 +238,7 @@
 
     <section class="page admin-only" data-page="targets">
       <div class="page-heading"><div><h1>目标任务表</h1><p class="page-subtitle">按孩子导出空白表，打印后手写勾选。</p></div><button class="button button-primary" id="export-targets" type="button">导出 Excel</button></div>
-      <div class="analytics-controls"><label>周期<select id="target-unit"><option value="week" selected>按周</option><option value="month">按月</option><option value="quarter">按季</option></select></label><label>所在日期<input id="target-date" type="date"></label><label class="check-label"><input id="target-all-items" type="checkbox">全部项目</label></div>
+      <div class="analytics-controls"><label>周期<select id="target-unit"><option value="week" selected>按周</option><option value="month">按月</option><option value="quarter">按季</option></select></label><label>所在日期<input id="target-date" type="date"></label><label>筛选<select id="target-filter"><option value="all" selected>全部项目</option><option value="goal">有目标</option><option value="earn">加分项</option><option value="deduct">扣分项</option></select></label></div>
       <div id="target-sheets"></div>
       <div class="empty-state hidden" id="targets-empty">还没有项目设置目标</div>
     </section>
