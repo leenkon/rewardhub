@@ -2285,7 +2285,7 @@ def target_sheet_request(payload: dict[str, Any]) -> dict[str, Any]:
         if name and rows:
             sheets.append({"name": name, "rows": rows})
     if not sheets:
-        raise ValueError("还没有项目设置目标")
+        raise ValueError("没有可导出的项目")
     return {"unit": unit, "date": day, "range": str(payload.get("range") or "").strip()[:80], "heads": heads, "sheets": sheets}
 
 

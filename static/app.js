@@ -1248,29 +1248,35 @@ function targetColumns(unit, start, end) {
   return columns;
 }
 
-function targetRows(childId) {
+function targetRows(childId, allItems) {
   const rows = [];
   ["earn", "deduct"].forEach((kind) => {
     const off = excludedIds(childId, kind);
     libraryItems(kind).forEach((item) => {
-      const goal = off.has(Number(item.id)) ? "" : targetTallyText(item, kind);
-      if (goal) rows.push({ kind, item, goal });
+      if (off.has(Number(item.id)) || !item.active) return;
+      rows.push({ kind, item, goal: targetTallyText(item, kind) });
     });
   });
-  return rows;
+  // Items without a rule still belong on a printable sheet, they just leave the 目标 column blank to write in.
+  return allItems ? rows : rows.filter((row) => row.goal);
+}
+
+function targetEmptyText(allItems) {
+  return allItems ? "还没有启用中的项目" : "还没有项目设置目标";
 }
 
 function targetSheetModel() {
+  const allItems = document.getElementById("target-all-items").checked;
   const unit = document.getElementById("target-unit").value;
   const input = document.getElementById("target-date");
   if (!input.value) input.value = localDate();
   const { start, end } = periodAnchors(unit, input.value);
-  const sheets = (appState.data.children || []).map((child) => ({ child, rows: targetRows(child.id) })).filter((sheet) => sheet.rows.length);
-  return { unit, day: input.value, columns: targetColumns(unit, start, end), range: `${TARGET_CHIP_TEXT[unit]} ${localDate(start)} ~ ${localDate(end)}`, sheets };
+  const sheets = (appState.data.children || []).map((child) => ({ child, rows: targetRows(child.id, allItems) })).filter((sheet) => sheet.rows.length);
+  return { unit, allItems, day: input.value, columns: targetColumns(unit, start, end), range: `${TARGET_CHIP_TEXT[unit]} ${localDate(start)} ~ ${localDate(end)}`, sheets };
 }
 
 function renderTargetSheets() {
-  const { columns, range, sheets } = targetSheetModel();
+  const { columns, range, sheets, allItems } = targetSheetModel();
   document.getElementById("target-sheets").innerHTML = sheets.map((sheet) => `<section class="target-sheet"><div class="sheet-head"><h2>${escapeHtml(sheet.child.display_name)}</h2><p>${range}</p></div><div class="table-scroll"><table class="target-table"><thead><tr><th>项目</th><th>目标</th>${columns
     .map((column) => `<th class="${column.weekend ? "weekend" : ""}"><b>${column.top}</b><small>${column.sub}</small></th>`)
     .join("")}</tr></thead><tbody>${sheet.rows
@@ -1278,13 +1284,14 @@ function renderTargetSheets() {
       .map((column) => `<td class="${column.weekend ? "weekend" : ""}"></td>`)
       .join("")}</tr>`)
     .join("")}</tbody></table></div></section>`).join("");
+  document.getElementById("targets-empty").textContent = targetEmptyText(allItems);
   document.getElementById("targets-empty").classList.toggle("hidden", Boolean(sheets.length));
 }
 
 async function exportTargetSheet() {
   const model = targetSheetModel();
   if (!model.sheets.length) {
-    showToast("还没有项目设置目标");
+    showToast(targetEmptyText(model.allItems));
     return;
   }
   const button = document.getElementById("export-targets");
@@ -2011,6 +2018,7 @@ document.getElementById("period-tabs").addEventListener("click", (event) => {
 });
 document.getElementById("target-unit").addEventListener("change", renderTargetSheets);
 document.getElementById("target-date").addEventListener("change", renderTargetSheets);
+document.getElementById("target-all-items").addEventListener("change", renderTargetSheets);
 document.getElementById("export-targets").addEventListener("click", exportTargetSheet);
 document.getElementById("analytics-scope").addEventListener("change", (event) => {
   appState.analyticsScope = event.target.value;

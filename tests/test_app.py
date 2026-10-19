@@ -2314,7 +2314,7 @@ class PointsManagerApiTests(unittest.TestCase):
             (dict(payload, unit="day"), "导出周期"),
             (dict(payload, date="yesterday"), "导出日期"),
             (dict(payload, heads=[["项目", "目标", "一"], ["", "", "10/19", "10/20"]]), "表头"),
-            (dict(payload, sheets=[{"name": "小明", "rows": []}]), "还没有项目设置目标"),
+            (dict(payload, sheets=[{"name": "小明", "rows": []}]), "没有可导出的项目"),
         ):
             response = self.client.post("/api/targets/export", json=broken)
             self.assertEqual(response.status_code, 400)

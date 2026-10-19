@@ -516,6 +516,8 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .analytics-controls { position: sticky; top: 80px; z-index: 8; display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin: 0 0 18px; padding: 8px 11px; background: rgba(255, 255, 255, .94); border: 1px solid var(--line); border-radius: var(--radius-sm); backdrop-filter: blur(10px); }
 .analytics-controls label { flex: 0 1 160px; color: var(--muted); font-size: 11px; font-weight: 750; }
 .analytics-controls select { display: block; min-width: 132px; margin-top: 5px; }
+/* A bare checkbox has no stacked control under it, so it hugs its text instead of taking a 160px track. */
+.analytics-controls .check-label { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; }
 .scope-note { margin-left: 7px; color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .scope-note:empty { display: none; }
 /* Chart.js canvases carry an intrinsic 300px width that blows out narrow grid tracks. */
