@@ -227,13 +227,20 @@
 
     <section class="page" data-page="analytics">
       <div class="page-heading"><div><h1>积分可视化</h1><p class="page-subtitle">趋势、构成与孩子间对比。</p></div></div>
-      <div class="analytics-controls"><label>时间范围<select id="analytics-range"><option value="7">近 7 天</option><option value="30" selected>近 30 天</option><option value="90">近 90 天</option></select></label><label>分析对象<select id="analytics-scope"></select></label></div>
+      <div class="analytics-controls"><label>时间范围<select id="analytics-range"><option value="7">近 7 天</option><option value="30" selected>近 30 天</option><option value="90">近 90 天</option></select></label><label>统计粒度<select id="period-unit"><option value="day">按天</option><option value="week" selected>按周</option><option value="month">按月</option><option value="quarter">按季</option></select></label><label>期数<select id="period-count"></select></label><label>分析对象<select id="analytics-scope"></select></label></div>
       <div class="summary-grid" id="analytics-summary"></div>
       <section class="content-panel chart-panel"><div class="section-heading"><div><h2>每日净得分</h2><p class="panel-note">每个孩子一条曲线。</p></div></div><div class="chart-frame"><canvas id="chart-trend"></canvas></div><div class="empty-state hidden" id="chart-trend-empty">暂无积分记录</div></section>
       <section class="content-panel chart-panel"><div class="section-heading"><div><h2>累计积分余额</h2></div></div><div class="chart-frame"><canvas id="chart-balance"></canvas></div></section>
       <div class="chart-pair"><section class="content-panel chart-panel"><div class="section-heading"><div><h2>积分去向<span class="scope-note" data-scope-note></span></h2></div><div class="chart-tabs" id="pie-tabs"><button class="chip-button active" data-pie-kind="earn" type="button">得分来源</button><button class="chip-button" data-pie-kind="deduct" type="button">扣分原因</button><button class="chip-button" data-pie-kind="reward" type="button">兑换奖励</button></div></div><p class="panel-note hidden" data-ring-note></p><div class="chart-frame chart-frame-pie"><canvas id="chart-pie"></canvas></div><div class="empty-state hidden" id="chart-pie-empty">该范围暂无数据</div></section>
       <section class="content-panel chart-panel"><div class="section-heading"><div><h2>孩子得分 / 失分</h2></div></div><div class="chart-frame"><canvas id="chart-compare"></canvas></div></section></div>
-      <div class="flow-pair"><section class="content-panel"><div class="section-heading"><h2>近期得分<span class="scope-note" data-scope-note></span></h2><span class="muted" data-flow-range-note>近 30 天</span></div><div class="flow-list" id="analytics-gained"></div></section><section class="content-panel"><div class="section-heading"><h2>近期失分<span class="scope-note" data-scope-note></span></h2><span class="muted" data-flow-range-note>近 30 天</span></div><div class="flow-list" id="analytics-lost"></div></section></div>
+      <section class="content-panel period-panel"><div class="section-heading"><div><h2>项目完成情况<span class="scope-note" data-scope-note></span></h2><p class="panel-note"><span data-period-note></span>每格依次为完成量、完成分、奖惩分。</p></div><div class="chart-tabs" id="period-tabs"><button class="chip-button active" data-period-kind="earn" type="button">加分项目</button><button class="chip-button" data-period-kind="deduct" type="button">扣分项目</button></div></div><div class="table-scroll"><table class="management-table period-table"><thead id="period-head"></thead><tbody id="period-body"></tbody><tfoot id="period-foot"></tfoot></table></div><div class="empty-state hidden" id="period-empty">该范围暂无记录</div></section>
+    </section>
+
+    <section class="page admin-only" data-page="targets">
+      <div class="page-heading"><div><h1>目标任务表</h1><p class="page-subtitle">按孩子导出空白表，打印后手写勾选。</p></div><button class="button button-primary" id="export-targets" type="button">导出 Excel</button></div>
+      <div class="analytics-controls"><label>周期<select id="target-unit"><option value="week" selected>按周</option><option value="month">按月</option><option value="quarter">按季</option></select></label><label>所在日期<input id="target-date" type="date"></label></div>
+      <div id="target-sheets"></div>
+      <div class="empty-state hidden" id="targets-empty">还没有项目设置目标</div>
     </section>
 
     <section class="page admin-only" data-page="accounts">
@@ -255,6 +262,7 @@
   <div class="nav-more-sheet hidden" id="nav-more-sheet" aria-label="更多功能">
     <button class="nav-more-item" data-page-target="requests" type="button"><span>✓</span><small id="nav-requests-label">审核</small></button>
     <button class="nav-more-item" data-page-target="analytics" type="button"><span>◕</span><small>分析</small></button>
+    <button class="nav-more-item admin-only" data-page-target="targets" type="button"><span>▦</span><small>目标表</small></button>
     <button class="nav-more-item" data-page-target="achievements" type="button"><span>✦</span><small>成就</small></button>
     <button class="nav-more-item" data-page-target="records" type="button"><span>▤</span><small>记录</small></button>
     <button class="nav-more-item child-only" data-page-target="exchange" type="button"><span>★</span><small>奖励商店</small></button>

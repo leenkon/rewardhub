@@ -3,17 +3,21 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import io
 import math
 import os
 import re
 import secrets
 import sqlite3
 import sys
+import zipfile
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import quote
+from xml.sax.saxutils import escape
 
 from flask import Flask, Response, abort, jsonify, render_template, request, send_file, session
 
@@ -107,6 +111,16 @@ DEDUCT_STREAK_SOURCES = {
 TARGET_STREAK_SOURCE = "target_streak"
 ANALYTICS_MAX_DAYS = 365
 RECENT_WINDOW_DAYS = 7
+# Project-by-window table on the analytics page: the default granularity and the widest column count it may ask for.
+ITEM_PERIOD_UNIT = "week"
+ITEM_PERIOD_COUNT = 8
+ITEM_PERIOD_MAX = 31
+# Target sheet workbook: printable units and the caps one export request may carry.
+TARGET_SHEET_UNITS = ("week", "month", "quarter")
+TARGET_SHEET_MAX_CHILDREN = 12
+TARGET_SHEET_MAX_ROWS = 60
+TARGET_SHEET_MAX_COLUMNS = 64
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 WEEK_SETTLE_LOOKBACK = 12
 DAY_SETTLE_LOOKBACK = 60
 # Consecutive-period rules look back a bounded number of windows, whatever the unit picks.
@@ -1918,6 +1932,104 @@ def flow_groups(conn: sqlite3.Connection, account_ids: list[int], start_date: st
     return {"projects": buckets, "gained": gained, "lost": lost}
 
 
+def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: str, period_count: int) -> dict[str, Any]:
+    """One row per earn/deduct item across the last N windows: how often it was logged, with the coins split into work and settlement."""
+    current = period_start(unit, current_date())
+    periods = []
+    start = period_shift(unit, 1, current, 1 - period_count)
+    while start <= current:
+        periods.append({"start": start, "end": period_end(unit, start), "label": period_label(unit, start)})
+        start = period_shift(unit, 1, start, 1)
+    window_of = {entry["start"]: position for position, entry in enumerate(periods)}
+    other: dict[str, int] = {"count": 0, "gained": 0, "lost": 0}
+    result: dict[str, Any] = {"unit": unit, "periods": periods, "items": {"earn": [], "deduct": []}, "other": other}
+    if not account_ids:
+        return result
+    marks = ",".join("?" * len(account_ids))
+    where = f"account_id IN ({marks}) AND date >= ? AND date <= ?"
+    params: list[Any] = [*account_ids, periods[0]["start"], periods[-1]["end"]]
+    library: dict[str, dict[int, sqlite3.Row]] = {}
+    for kind in ("earn", "deduct"):
+        # Only earn items carry a quantity measure; deduct items always count occurrences.
+        measure = "target_measure" if kind == "earn" else "NULL AS target_measure"
+        rows = conn.execute(f"SELECT id, name, {measure} FROM {ITEM_TABLES[kind]}").fetchall()
+        library[kind] = {int(row["id"]): row for row in rows}
+    entries: dict[tuple[str, int], dict[str, Any]] = {}
+
+    def tally_for(kind: str, row: sqlite3.Row) -> dict[str, int] | None:
+        position = window_of.get(period_start(unit, row["date"]))
+        if position is None:
+            return None
+        key = (kind, int(row["item_id"]))
+        entry = entries.get(key)
+        if entry is None:
+            item = library[kind].get(key[1])
+            entry = entries[key] = {
+                "kind": kind,
+                "item_id": key[1],
+                "name": item["name"] if item else str(row["title"]),
+                "measure": "quantity" if item and str(item["target_measure"] or "count") == "quantity" else "count",
+                "cells": [None] * len(periods),
+            }
+        tally = entry["cells"][position]
+        if tally is None:
+            tally = entry["cells"][position] = {"count": 0, "quantity": 0, "coins": 0, "payout": 0}
+        return tally
+
+    for kind in ("earn", "deduct"):
+        for row in conn.execute(
+            f"SELECT item_id, title, date, amount, quantity FROM records WHERE {COMPLETION_FILTERS[kind]} AND {where}",
+            params,
+        ).fetchall():
+            tally = tally_for(kind, row)
+            if tally is None:
+                continue
+            tally["count"] += 1
+            tally["quantity"] += int(row["quantity"] or 0)
+            tally["coins"] += int(row["amount"])
+    # Settlement rows ride on the same item, so their coins stay a separate column instead of inflating what was earned.
+    for row in conn.execute(
+        f"""
+        SELECT item_kind, item_id, title, date, amount FROM records
+        WHERE {where} AND item_kind IN ('earn', 'deduct') AND item_id IS NOT NULL AND {SETTLEMENT_SOURCE_PREDICATE}
+        """,
+        params,
+    ).fetchall():
+        tally = tally_for(row["item_kind"], row)
+        if tally is not None:
+            tally["payout"] += int(row["amount"])
+
+    for row in conn.execute(
+        f"""
+        SELECT amount FROM records
+        WHERE {where} AND (item_kind IS NULL OR item_kind NOT IN ('earn', 'deduct') OR item_id IS NULL)
+        """,
+        params,
+    ).fetchall():
+        amount = int(row["amount"])
+        other["count"] += 1
+        other["gained"] += amount if amount > 0 else 0
+        other["lost"] += -amount if amount < 0 else 0
+
+    def rows_of(kind: str) -> list[dict[str, Any]]:
+        found = []
+        for (entry_kind, _item_id), entry in entries.items():
+            if entry_kind != kind:
+                continue
+            totals = {key: 0 for key in ("count", "quantity", "coins", "payout")}
+            for tally in entry["cells"]:
+                if not tally:
+                    continue
+                for key in totals:
+                    totals[key] += tally[key]
+            found.append({**entry, "total": totals})
+        found.sort(key=lambda item: (-abs(item["total"]["coins"] + item["total"]["payout"]), -item["total"]["count"], item["name"]))
+        return found
+
+    result["items"] = {"earn": rows_of("earn"), "deduct": rows_of("deduct")}
+    return result
+
+
 def recent_flow_payload(conn: sqlite3.Connection, account_id: int) -> dict[str, Any]:
     start_date = (date.fromisoformat(current_date()) - timedelta(days=RECENT_WINDOW_DAYS - 1)).isoformat()
     flows = flow_groups(conn, [account_id], start_date)
@@ -1938,7 +2050,7 @@ def recent_flow_payload(conn: sqlite3.Connection, account_id: int) -> dict[str, 
     }
 
 
-def analytics_payload(conn: sqlite3.Connection, account_ids: list[int], days: int) -> dict[str, Any]:
+def analytics_payload(conn: sqlite3.Connection, account_ids: list[int], days: int, unit: str, period_count: int) -> dict[str, Any]:
     today = date.fromisoformat(current_date())
     dates = [(today - timedelta(days=days - 1 - index)).isoformat() for index in range(days)]
     start_date = dates[0]
@@ -1991,8 +2103,7 @@ def analytics_payload(conn: sqlite3.Connection, account_ids: list[int], days: in
         "series": series,
         "aggregate": aggregate,
         "projects": flows["projects"],
-        "gained": flows["gained"],
-        "lost": flows["lost"],
+        "item_periods": item_period_stats(conn, account_ids, unit, period_count),
         "comparison": comparison,
         "summary": {
             "gained": sum(aggregate["gained"]),
@@ -2001,6 +2112,181 @@ def analytics_payload(conn: sqlite3.Connection, account_ids: list[int], days: in
             "balance": sum(item["balance"] for item in comparison),
         },
     }
+
+
+XML_HEADER = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+QUOTE_ATTRS = {'"': "&quot;"}
+# Style slots used by the target sheet: 0 default, 1 title, 2 head cell, 3 name cell, 4 bordered box.
+XLSX_STYLES = (
+    f'{XML_HEADER}<styleSheet xmlns="{SHEET_NS}">'
+    '<fonts count="3">'
+    '<font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font>'
+    '<font><b/><sz val="12"/><color theme="1"/><name val="Calibri"/></font>'
+    '<font><b/><sz val="10"/><color rgb="FF55655C"/><name val="Calibri"/></font>'
+    "</fonts>"
+    '<fills count="3">'
+    '<fill><patternFill patternType="none"/></fill>'
+    '<fill><patternFill patternType="gray125"/></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFE7F1EA"/><bgColor indexed="64"/></patternFill></fill>'
+    "</fills>"
+    '<borders count="2">'
+    "<border><left/><right/><top/><bottom/><diagonal/></border>"
+    '<border><left style="thin"><color rgb="FFA8BCB2"/></left><right style="thin"><color rgb="FFA8BCB2"/></right>'
+    '<top style="thin"><color rgb="FFA8BCB2"/></top><bottom style="thin"><color rgb="FFA8BCB2"/></bottom><diagonal/></border>'
+    "</borders>"
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+    '<cellXfs count="5">'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+    '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
+    '<alignment horizontal="center" vertical="center" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1">'
+    '<alignment horizontal="left" vertical="center" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1">'
+    '<alignment horizontal="center" vertical="center"/></xf>'
+    "</cellXfs>"
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+    "</styleSheet>"
+)
+
+
+def xlsx_column(index: int) -> str:
+    letters = ""
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def xlsx_text_cell(ref: str, text: str, style: int) -> str:
+    return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{escape(text)}</t></is></c>'
+
+
+def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) -> str:
+    """Merged title band, two frozen head rows, then one bordered box per unit for handwriting."""
+    columns = len(heads[0])
+    last_column = xlsx_column(columns)
+    body_start = len(heads) + 2
+    lines = [f'<row r="1" ht="22" customHeight="1">{xlsx_text_cell("A1", title, 1)}</row>']
+    for index, head in enumerate(heads, start=2):
+        cells = "".join(xlsx_text_cell(f"{xlsx_column(column)}{index}", text, 2) for column, text in enumerate(head, start=1))
+        lines.append(f'<row r="{index}" ht="16" customHeight="1">{cells}</row>')
+    for offset, row in enumerate(rows):
+        index = body_start + offset
+        boxes = "".join(f'<c r="{xlsx_column(column)}{index}" s="4"/>' for column in range(3, columns + 1))
+        lines.append(
+            f'<row r="{index}" ht="26" customHeight="1">'
+            f'{xlsx_text_cell(f"A{index}", row[0], 3)}{xlsx_text_cell(f"B{index}", row[1], 4)}{boxes}</row>'
+        )
+    return (
+        f"{XML_HEADER}<worksheet xmlns=\"{SHEET_NS}\">"
+        "<sheetPr><pageSetUpPr fitToPage=\"1\"/></sheetPr>"
+        f'<dimension ref="A1:{last_column}{body_start + len(rows) - 1}"/>'
+        f'<sheetViews><sheetView showGridLines="0" workbookViewId="0">'
+        f'<pane xSplit="2" ySplit="{body_start - 1}" topLeftCell="C{body_start}" activePane="bottomRight" state="frozen"/>'
+        "</sheetView></sheetViews>"
+        '<sheetFormatPr defaultRowHeight="15"/>'
+        f'<cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="9" customWidth="1"/>'
+        f'<col min="3" max="{columns}" width="4.4" customWidth="1"/></cols>'
+        f'<sheetData>{"".join(lines)}</sheetData>'
+        f'<mergeCells count="1"><mergeCell ref="A1:{last_column}1"/></mergeCells>'
+        '<printOptions horizontalCentered="1"/>'
+        '<pageMargins left="0.4" right="0.4" top="0.6" bottom="0.6" header="0.3" footer="0.3"/>'
+        '<pageSetup paperSize="9" orientation="landscape" fitToWidth="1" fitToHeight="0"/>'
+        "</worksheet>"
+    )
+
+
+def xlsx_tab_name(raw: str, index: int, used: set[str]) -> str:
+    """Excel forbids a handful of characters in a tab name and caps it at 31 characters."""
+    name = re.sub(r"[\\/*?:\[\]]", "_", raw).strip().strip(".")[:31] or f"孩子{index}"
+    base, step = name, 1
+    while name in used:
+        name = f"{base[:28]}({step})"
+        step += 1
+    used.add(name)
+    return name
+
+
+def xlsx_workbook(sheets: list[tuple[str, str]]) -> bytes:
+    """The five parts Excel needs; cells carry inline strings so no shared-string table has to stay in sync."""
+    overrides = "".join(
+        f'<Override PartName="/xl/worksheets/sheet{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        for index in range(1, len(sheets) + 1)
+    )
+    content_types = (
+        f'{XML_HEADER}<Types xmlns="{CT_NS}">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        f'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>{overrides}</Types>'
+    )
+    root_rels = (
+        f'{XML_HEADER}<Relationships xmlns="{PKG_REL_NS}">'
+        f'<Relationship Id="rId1" Type="{REL_NS}/officeDocument" Target="xl/workbook.xml"/></Relationships>'
+    )
+    book_rels = (
+        f'{XML_HEADER}<Relationships xmlns="{PKG_REL_NS}">'
+        + "".join(
+            f'<Relationship Id="rId{index}" Type="{REL_NS}/worksheet" Target="worksheets/sheet{index}.xml"/>'
+            for index in range(1, len(sheets) + 1)
+        )
+        + f'<Relationship Id="rId{len(sheets) + 1}" Type="{REL_NS}/styles" Target="styles.xml"/></Relationships>'
+    )
+    workbook = (
+        f'{XML_HEADER}<workbook xmlns="{SHEET_NS}" xmlns:r="{REL_NS}"><sheets>'
+        + "".join(
+            f'<sheet name="{escape(name, QUOTE_ATTRS)}" sheetId="{index}" r:id="rId{index}"/>'
+            for index, (name, _) in enumerate(sheets, start=1)
+        )
+        + "</sheets></workbook>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", root_rels)
+        archive.writestr("xl/workbook.xml", workbook)
+        archive.writestr("xl/_rels/workbook.xml.rels", book_rels)
+        archive.writestr("xl/styles.xml", XLSX_STYLES)
+        for index, (name, sheet_xml) in enumerate(sheets, start=1):
+            archive.writestr(f"xl/worksheets/sheet{index}.xml", sheet_xml)
+    return buffer.getvalue()
+
+
+def target_sheet_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """The browser already renders this sheet, so export re-uses its wording; the caps only bound the workbook size."""
+    unit = str(payload.get("unit") or "").strip().lower()
+    if unit not in TARGET_SHEET_UNITS:
+        raise ValueError(f"导出周期只能选{unit_choice_text(TARGET_SHEET_UNITS)}")
+    day = str(payload.get("date") or "").strip()
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        raise ValueError("导出日期无效")
+    raw_heads = payload.get("heads")
+    if not isinstance(raw_heads, list) or len(raw_heads) != 2:
+        raise ValueError("导出表头需要两行")
+    heads = [[str(cell)[:12] for cell in head[:TARGET_SHEET_MAX_COLUMNS]] for head in raw_heads if isinstance(head, list)]
+    if len(heads) != 2 or len(heads[0]) < 3 or len(heads[1]) != len(heads[0]):
+        raise ValueError("导出表头列数不符")
+    sheets = []
+    for entry in (payload.get("sheets") or [])[:TARGET_SHEET_MAX_CHILDREN]:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()[:40]
+        rows = []
+        for row in (entry.get("rows") or [])[:TARGET_SHEET_MAX_ROWS]:
+            if isinstance(row, list) and len(row) >= 2 and str(row[0]).strip():
+                rows.append([str(row[0])[:40], str(row[1])[:24]])
+        if name and rows:
+            sheets.append({"name": name, "rows": rows})
+    if not sheets:
+        raise ValueError("还没有项目设置目标")
+    return {"unit": unit, "date": day, "range": str(payload.get("range") or "").strip()[:80], "heads": heads, "sheets": sheets}
 
 
 def request_rows(conn: sqlite3.Connection, user: sqlite3.Row) -> list[dict[str, Any]]:
@@ -3357,6 +3643,10 @@ def get_analytics():
         days = positive_int(request.args.get("days"), "统计天数")
         requested = request.args.get("account_id")
         scoped_account_id = positive_int(requested, "账号") if requested else None
+        unit = str(request.args.get("unit") or ITEM_PERIOD_UNIT).strip().lower()
+        if unit not in RULE_UNITS:
+            raise ValueError(f"统计周期只能选{unit_choice_text(RULE_UNITS)}")
+        period_count = min(positive_int(request.args.get("periods") or ITEM_PERIOD_COUNT, "统计期数"), ITEM_PERIOD_MAX)
     except ValueError as exc:
         return api_error(str(exc))
     days = min(days, ANALYTICS_MAX_DAYS)
@@ -3376,7 +3666,32 @@ def get_analytics():
                 int(row["id"])
                 for row in conn.execute("SELECT id FROM accounts WHERE role = 'child' AND active = 1 ORDER BY id").fetchall()
             ]
-        return jsonify(analytics_payload(conn, account_ids, days))
+        return jsonify(analytics_payload(conn, account_ids, days, unit, period_count))
+
+
+@app.post("/api/targets/export")
+@require_admin
+def export_target_sheet():
+    """Turn the target sheet the admin is looking at into a workbook; the wording stays owned by the page that renders it."""
+    try:
+        data = target_sheet_request(request.get_json(silent=True) or {})
+    except ValueError as exc:
+        return api_error(str(exc))
+    used: set[str] = set()
+    sheets = [
+        (
+            xlsx_tab_name(sheet["name"], index, used),
+            xlsx_worksheet(f"{sheet['name']} · {data['range']}", data["heads"], sheet["rows"]),
+        )
+        for index, sheet in enumerate(data["sheets"], start=1)
+    ]
+    label = f"目标任务表_{data['date']}{RULE_UNIT_SHORT_TEXT[data['unit']]}.xlsx"
+    fallback = f"targets_{data['date']}_{data['unit']}.xlsx"
+    return Response(
+        xlsx_workbook(sheets),
+        mimetype=XLSX_MIME,
+        headers={"Content-Disposition": f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(label)}"},
+    )
 
 
 @app.get("/api/settlements/periods")

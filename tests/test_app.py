@@ -1,11 +1,14 @@
 import base64
 import contextlib
+import io
 import os
 import sqlite3
 import tempfile
 import unittest
+import zipfile
 from datetime import date, timedelta
 from pathlib import Path
+from xml.etree import ElementTree
 
 BOOTSTRAP_DIR = None
 
@@ -1744,10 +1747,12 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(self.state()["total_points"], 9)
         self.assertEqual(len(self.state()["records"]), len(bonuses) + 2)
 
-        # Points-free logs stay out of the gain/loss lists; only the settled bonus shows.
-        flows = self.client.get("/api/analytics?days=30").get_json()
-        self.assertEqual([row["total"] for row in flows["lost"] if row["name"] == "计算题"], [])
-        self.assertEqual([row["total"] for row in flows["gained"] if row["name"] == "计算题"], [9])
+        # Points-free logs still count as completions, but only the settled bonus carries coins.
+        periods = self.client.get("/api/analytics?days=30").get_json()["item_periods"]
+        earned = next(row for row in periods["items"]["earn"] if row["name"] == "计算题")
+        self.assertEqual((earned["measure"], earned["total"]["count"], earned["total"]["quantity"]), ("quantity", 2, 27))
+        self.assertEqual((earned["total"]["coins"], earned["total"]["payout"]), (0, 9))
+        self.assertEqual([row["name"] for row in periods["items"]["deduct"] if row["name"] == "计算题"], [])
         self.client.delete(f"/api/items/earn/{item['id']}")
 
     def test_quantity_completion_pays_plus_only_the_full_overshoot(self):
@@ -2236,8 +2241,21 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual({row["account_id"] for row in data["comparison"]}, {first["id"], second["id"]})
         project_names = [row["name"] for row in data["projects"]["earn"]]
         self.assertIn("完成作业", project_names)
-        self.assertIn("完成作业", [row["name"] for row in data["gained"]])
-        self.assertIn("临时扣分", [row["name"] for row in data["lost"]])
+        periods = data["item_periods"]
+        self.assertIn("完成作业", [row["name"] for row in periods["items"]["earn"]])
+        self.assertEqual(periods["other"], {"count": 1, "gained": 0, "lost": 3})
+        self.assertEqual(len(periods["periods"]), self.app_module.ITEM_PERIOD_COUNT)
+
+        today = date.today().isoformat()
+        daily = self.client.get("/api/analytics?days=7&unit=day&periods=3").get_json()["item_periods"]
+        self.assertEqual(daily["unit"], "day")
+        self.assertEqual(daily["periods"][-1]["label"], today)
+        row = next(item for item in daily["items"]["earn"] if item["name"] == "完成作业")
+        self.assertEqual((row["measure"], row["total"]["count"], row["total"]["coins"]), ("count", 2, 20))
+        self.assertEqual(row["cells"][-1]["count"], 2)
+        self.assertEqual(row["cells"][:-1], [None, None])
+        self.assertEqual(self.client.get("/api/analytics?days=7&unit=hour").status_code, 400)
+        self.assertEqual(self.client.get("/api/analytics?days=7&periods=0").status_code, 400)
 
         scoped = self.client.get(f"/api/analytics?days=7&account_id={first['id']}").get_json()
         self.assertEqual(scoped["summary"]["gained"], 10)
@@ -2250,6 +2268,62 @@ class PointsManagerApiTests(unittest.TestCase):
         self.client.post("/api/auth/login", json={"username": "kid-c", "password": "child123"})
         child_data = self.client.get("/api/analytics?days=30&account_id=%s" % second["id"]).get_json()
         self.assertEqual([row["account_id"] for row in child_data["series"]], [first["id"]])
+
+    def test_target_sheet_exports_workbook(self):
+        sheet_namespace = "{%s}" % self.app_module.SHEET_NS
+        payload = {
+            "unit": "week",
+            "date": date.today().isoformat(),
+            "range": "本周 10/19 ~ 10/25",
+            "heads": [["项目", "目标", "一", "二"], ["", "", "10/19", "10/20"]],
+            "sheets": [
+                {"name": "小明[测*试:?]", "rows": [["阅读", "每周3次"], ["口算", "每周10次"]]},
+                {"name": "小明[测*试:?]", "rows": [["阅读", "每周3次"]]},
+            ],
+        }
+        response = self.client.post("/api/targets/export", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, self.app_module.XLSX_MIME)
+        self.assertIn("filename*=UTF-8''", response.headers["Content-Disposition"])
+
+        archive = zipfile.ZipFile(io.BytesIO(response.data))
+        self.assertEqual(archive.namelist().count("xl/worksheets/sheet2.xml"), 1)
+        self.assertNotIn("xl/worksheets/sheet3.xml", archive.namelist())
+        for part in archive.namelist():
+            ElementTree.fromstring(archive.read(part))
+
+        tabs = [element.get("name") for element in ElementTree.fromstring(archive.read("xl/workbook.xml")).iter(sheet_namespace + "sheet")]
+        self.assertEqual(len(tabs), 2)
+        self.assertEqual(len(set(tabs)), 2)
+        self.assertNotRegex("".join(tabs), r"[\\/*?:\[\]]")
+
+        sheet = ElementTree.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        self.assertEqual(len(list(sheet.iter(sheet_namespace + "row"))), 5)
+        self.assertEqual([element.get("ref") for element in sheet.iter(sheet_namespace + "mergeCell")], ["A1:D1"])
+        self.assertEqual(next(sheet.iter(sheet_namespace + "pageSetup")).get("orientation"), "landscape")
+        self.assertIn("每周3次", [element.text for element in sheet.iter(sheet_namespace + "t")])
+        boxes = list(sheet.iter(sheet_namespace + "row"))[3]
+        self.assertEqual(len(boxes.findall(sheet_namespace + "c")), 4)
+
+        wide = dict(payload, heads=[["项目", "目标"] + [str(step) for step in range(200)], ["", ""] + [str(step) for step in range(200)]])
+        wide_sheet = ElementTree.fromstring(zipfile.ZipFile(io.BytesIO(self.client.post("/api/targets/export", json=wide).data)).read("xl/worksheets/sheet1.xml"))
+        wide_head = list(wide_sheet.iter(sheet_namespace + "row"))[1]
+        self.assertEqual(len(wide_head.findall(sheet_namespace + "c")), self.app_module.TARGET_SHEET_MAX_COLUMNS)
+
+        for broken, message in (
+            (dict(payload, unit="day"), "导出周期"),
+            (dict(payload, date="yesterday"), "导出日期"),
+            (dict(payload, heads=[["项目", "目标", "一"], ["", "", "10/19", "10/20"]]), "表头"),
+            (dict(payload, sheets=[{"name": "小明", "rows": []}]), "还没有项目设置目标"),
+        ):
+            response = self.client.post("/api/targets/export", json=broken)
+            self.assertEqual(response.status_code, 400)
+            self.assertIn(message, response.get_json()["error"])
+
+        child = self.create_child(username="kid-export")
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": "kid-export", "password": "child123"})
+        self.assertEqual(self.client.post("/api/targets/export", json=payload).status_code, 403)
 
     def test_recent_flow_lists_gains_and_losses(self):
         child = self.create_child()

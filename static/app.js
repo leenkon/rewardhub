@@ -14,6 +14,9 @@ const appState = {
   analytics: null,
   analyticsScope: "all",
   analyticsPieKind: "earn",
+  analyticsUnit: "week",
+  analyticsPeriods: 8,
+  analyticsKind: "earn",
 };
 
 let confirmResolver = null;
@@ -306,7 +309,7 @@ async function loadSettlePeriods() {
 
 function navigate(page) {
   const isAdmin = appState.data?.user?.role === "admin";
-  const adminPages = ["deduct", "accounts", "settings"];
+  const adminPages = ["deduct", "accounts", "settings", "targets"];
   if (adminPages.includes(page) && !isAdmin) page = "home";
   appState.page = page;
   document.querySelectorAll(".page").forEach((element) => element.classList.toggle("active", element.dataset.page === page));
@@ -354,6 +357,8 @@ function render() {
   updateCashExchangeDiscount();
   updateCashExchangePreview();
   syncAnalyticsScopeOptions();
+  syncPeriodCountOptions();
+  if (appState.page === "targets") renderTargetSheets();
   if (appState.page === "analytics") loadAnalytics().catch((error) => showToast(error.message));
 }
 
@@ -613,6 +618,13 @@ function targetPeriodText(item, chip = false) {
   return chip ? TARGET_CHIP_TEXT[key] : TARGET_PERIOD_TEXT[key];
 }
 
+function targetTallyText(item, kind) {
+  const target = Number(item.week_target || 0);
+  if (!target) return "";
+  const tally = isQuantityItem(item, kind) ? `数量${target}` : `${target}次`;
+  return `${targetPeriodText(item)}${kind === "deduct" ? "上限" : ""}${tally}`;
+}
+
 function ruleSummary(item, kind) {
   const target = Number(item.week_target || 0);
   const parts = [];
@@ -620,8 +632,7 @@ function ruleSummary(item, kind) {
   if (target) {
     const byQuantity = isQuantityItem(item, kind);
     const bonusEvery = Number(item.bonus_every || 1);
-    const tally = byQuantity ? `数量${target}` : `${target}次`;
-    parts.push(`${targetPeriodText(item)}${deduct ? `上限${tally}` : tally}`);
+    parts.push(targetTallyText(item, kind));
     if (byQuantity) {
       parts.push(`达标+${Math.abs(Number(item.points))}`);
       if (item.week_bonus) parts.push(bonusEvery > 1 ? `超额每满${bonusEvery}个+${item.week_bonus}` : `超额每个+${item.week_bonus}`);
@@ -1019,12 +1030,46 @@ function renderAnalyticsSummary(data) {
   }).join("");
 }
 
-function flowRowMarkup(item, children) {
-  const kids = Object.entries(item.children || {}).sort((a, b) => Number(a[0]) - Number(b[0])).map(([id, stat]) => {
-    const child = children.find((entry) => String(entry.id) === id);
-    return child ? `<span>${escapeHtml(child.display_name)} ${stat.count}次 ${signed(stat.total)}</span>` : "";
-  }).join("");
-  return `<div class="flow-row flow-row-kids"><span class="flow-name">${escapeHtml(item.name)}</span><span class="flow-kids">${kids}</span></div>`;
+const PERIOD_OPTIONS = { day: [7, 14, 31], week: [4, 8, 12], month: [3, 6, 12], quarter: [2, 4, 8] };
+
+function periodHeadText(unit, start) {
+  if (unit === "month") return `${Number(start.slice(5, 7))}月`;
+  // Eight quarters span two years, so the bare 季号会重复；带上年后两位区分。
+  if (unit === "quarter") return `${start.slice(2, 4)}年${(Number(start.slice(5, 7)) - 1) / 3 + 1}季`;
+  if (unit === "year") return `${Number(start.slice(0, 4))}年`;
+  return chartLabelShort(start);
+}
+
+function periodCellMarkup(tally, measure) {
+  if (!tally) return "<td></td>";
+  // A window can pay out a penalty with no log inside it, so the count text only appears when something was done.
+  const done = tally.count || tally.quantity ? (measure === "quantity" ? `${tally.quantity}个` : `${tally.count}次`) : "";
+  const coins = tally.coins ? `<em class="${tally.coins > 0 ? "up" : "down"}">${signed(tally.coins)}</em>` : "";
+  const payout = tally.payout ? `<em class="payout ${tally.payout > 0 ? "up" : "down"}">${signed(tally.payout)}</em>` : "";
+  if (!done && !coins && !payout) return "<td></td>";
+  return `<td class="period-cell">${done ? `<span>${done}</span>` : ""}${coins}${payout}</td>`;
+}
+
+function renderItemPeriods(data = appState.analytics) {
+  const table = data?.item_periods;
+  if (!table) return;
+  const rows = table.items?.[appState.analyticsKind] || [];
+  const other = table.other || {};
+  document.getElementById("period-head").innerHTML = `<tr><th>项目</th><th>合计</th>${
+    table.periods.map((period) => `<th title="${escapeHtml(period.label)}">${periodHeadText(table.unit, period.start)}</th>`).join("")
+  }</tr>`;
+  document.getElementById("period-body").innerHTML = rows.map((item) => `<tr><th class="period-name">${escapeHtml(item.name)}</th>${
+    periodCellMarkup(item.total, item.measure)
+  }${item.cells.map((cell) => periodCellMarkup(cell, item.measure)).join("")}</tr>`).join("");
+  const coinsText = other.gained ? `<em class="up">+${other.gained}</em>` : "";
+  const lostText = other.lost ? `<em class="down">-${other.lost}</em>` : "";
+  document.getElementById("period-foot").innerHTML = other.count
+    ? `<tr><th class="period-name" colspan="2">兑换与其他</th><td colspan="${table.periods.length}">${other.count} 笔 ${coinsText}${lostText}</td></tr>`
+    : "";
+  document.querySelector("[data-period-note]").textContent = `近 ${table.periods.length} ${UNIT_MULTI_TEXT[table.unit]} · `;
+  const empty = !rows.length && !other.count;
+  document.getElementById("period-empty").classList.toggle("hidden", !empty);
+  document.querySelector(".period-table").closest(".table-scroll").classList.toggle("hidden", empty);
 }
 
 function analyticsScopeNote() {
@@ -1131,25 +1176,30 @@ function renderAnalytics() {
     },
     options: { ...ANALYTICS_CHART_OPTIONS, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
   });
-  const rangeNote = `近 ${data.days} 天`;
-  document.querySelectorAll("[data-flow-range-note]").forEach((element) => { element.textContent = rangeNote; });
   const scopeNote = analyticsScopeNote();
   document.querySelectorAll("[data-scope-note]").forEach((element) => { element.textContent = scopeNote; });
-  const kids = data.children || [];
-  const gained = (data.gained || []).slice(0, 6);
-  const lost = (data.lost || []).slice(0, 6);
-  document.getElementById("analytics-gained").innerHTML = gained.length ? gained.map((item) => flowRowMarkup(item, kids)).join("") : `<div class="empty-state">该范围内没有得分</div>`;
-  document.getElementById("analytics-lost").innerHTML = lost.length ? lost.map((item) => flowRowMarkup(item, kids)).join("") : `<div class="empty-state">该范围内没有失分</div>`;
+  renderItemPeriods(data);
 }
 
 async function loadAnalytics() {
   const days = Number(document.getElementById("analytics-range")?.value || 30);
-  const params = new URLSearchParams({ days: String(days) });
+  const params = new URLSearchParams({
+    days: String(days),
+    unit: appState.analyticsUnit,
+    periods: String(appState.analyticsPeriods),
+  });
   if (appState.data.user.role === "admin" && appState.analyticsScope && appState.analyticsScope !== "all") {
     params.set("account_id", appState.analyticsScope);
   }
   appState.analytics = await api(`/api/analytics?${params.toString()}`);
   renderAnalytics();
+}
+
+function syncPeriodCountOptions() {
+  const options = PERIOD_OPTIONS[appState.analyticsUnit] || PERIOD_OPTIONS.week;
+  if (!options.includes(appState.analyticsPeriods)) appState.analyticsPeriods = options[Math.floor(options.length / 2)];
+  document.getElementById("period-count").innerHTML = options.map((value) => `<option value="${value}">${value} 期</option>`).join("");
+  document.getElementById("period-count").value = String(appState.analyticsPeriods);
 }
 
 function syncAnalyticsScopeOptions() {
@@ -1163,6 +1213,108 @@ function syncAnalyticsScopeOptions() {
   select.innerHTML = `<option value="all">全部孩子</option>${children.map((child) => `<option value="${child.id}">${escapeHtml(child.display_name)}</option>`).join("")}`;
   appState.analyticsScope = [...select.options].some((option) => option.value === previous) ? previous : "all";
   select.value = appState.analyticsScope;
+}
+
+function periodAnchors(unit, day) {
+  const date = new Date(`${day}T00:00:00`);
+  if (unit === "month") return { start: new Date(date.getFullYear(), date.getMonth(), 1), end: new Date(date.getFullYear(), date.getMonth() + 1, 0) };
+  if (unit === "quarter") {
+    const first = Math.floor(date.getMonth() / 3) * 3;
+    return { start: new Date(date.getFullYear(), first, 1), end: new Date(date.getFullYear(), first + 3, 0) };
+  }
+  const monday = new Date(date);
+  monday.setDate(date.getDate() - (date.getDay() || 7) + 1);
+  return { start: monday, end: new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6) };
+}
+
+function targetColumns(unit, start, end) {
+  const cursor = new Date(start);
+  const columns = [];
+  while (cursor <= end) {
+    if (unit === "quarter") {
+      // 季度按 7 天一格，从季度首日起算：格顶是第几格，副行给出那格的起始日。
+      columns.push({ top: String(columns.length + 1), sub: `${cursor.getMonth() + 1}/${cursor.getDate()}` });
+      cursor.setDate(cursor.getDate() + 7);
+      continue;
+    }
+    const weekday = (cursor.getDay() || 7) - 1;
+    columns.push({
+      top: unit === "week" ? dayNames[weekday].slice(1) : String(cursor.getDate()),
+      sub: unit === "week" ? `${cursor.getMonth() + 1}/${cursor.getDate()}` : dayNames[weekday],
+      weekend: weekday >= 5,
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return columns;
+}
+
+function targetRows(childId) {
+  const rows = [];
+  ["earn", "deduct"].forEach((kind) => {
+    const off = excludedIds(childId, kind);
+    libraryItems(kind).forEach((item) => {
+      const goal = off.has(Number(item.id)) ? "" : targetTallyText(item, kind);
+      if (goal) rows.push({ kind, item, goal });
+    });
+  });
+  return rows;
+}
+
+function targetSheetModel() {
+  const unit = document.getElementById("target-unit").value;
+  const input = document.getElementById("target-date");
+  if (!input.value) input.value = localDate();
+  const { start, end } = periodAnchors(unit, input.value);
+  const sheets = (appState.data.children || []).map((child) => ({ child, rows: targetRows(child.id) })).filter((sheet) => sheet.rows.length);
+  return { unit, day: input.value, columns: targetColumns(unit, start, end), range: `${TARGET_CHIP_TEXT[unit]} ${localDate(start)} ~ ${localDate(end)}`, sheets };
+}
+
+function renderTargetSheets() {
+  const { columns, range, sheets } = targetSheetModel();
+  document.getElementById("target-sheets").innerHTML = sheets.map((sheet) => `<section class="target-sheet"><div class="sheet-head"><h2>${escapeHtml(sheet.child.display_name)}</h2><p>${range}</p></div><div class="table-scroll"><table class="target-table"><thead><tr><th>项目</th><th>目标</th>${columns
+    .map((column) => `<th class="${column.weekend ? "weekend" : ""}"><b>${column.top}</b><small>${column.sub}</small></th>`)
+    .join("")}</tr></thead><tbody>${sheet.rows
+    .map((row) => `<tr><th class="sheet-name" title="${escapeHtml(ruleSummary(row.item, row.kind))}">${escapeHtml(row.item.name)}</th><td class="sheet-goal">${row.goal}</td>${columns
+      .map((column) => `<td class="${column.weekend ? "weekend" : ""}"></td>`)
+      .join("")}</tr>`)
+    .join("")}</tbody></table></div></section>`).join("");
+  document.getElementById("targets-empty").classList.toggle("hidden", Boolean(sheets.length));
+}
+
+async function exportTargetSheet() {
+  const model = targetSheetModel();
+  if (!model.sheets.length) {
+    showToast("还没有项目设置目标");
+    return;
+  }
+  const button = document.getElementById("export-targets");
+  button.disabled = true;
+  try {
+    const payload = {
+      unit: model.unit,
+      date: model.day,
+      range: model.range,
+      heads: [["项目", "目标"].concat(model.columns.map((column) => column.top)), ["", ""].concat(model.columns.map((column) => column.sub))],
+      sheets: model.sheets.map((sheet) => ({ name: sheet.child.display_name, rows: sheet.rows.map((row) => [row.item.name, row.goal]) })),
+    };
+    const response = await fetch("/api/targets/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || "导出失败");
+    }
+    // The workbook name belongs to the server, so the download keeps the same one the response asks for.
+    const disposition = /filename\*=UTF-8''([^;]+)/.exec(response.headers.get("Content-Disposition") || "");
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(await response.blob());
+    link.href = url;
+    link.download = disposition ? decodeURIComponent(disposition[1]) : `targets_${model.day}.xlsx`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 const RULE_FIELDS = ["week_target", "week_bonus", "week_penalty", "target_every", "bonus_every", "streak_weeks", "streak_bonus", "cap_count"];
@@ -1841,6 +1993,25 @@ document.getElementById("pie-tabs").addEventListener("click", (event) => {
   renderAnalyticsPie();
 });
 document.getElementById("analytics-range").addEventListener("change", () => { loadAnalytics().catch((error) => showToast(error.message)); });
+document.getElementById("period-unit").addEventListener("change", (event) => {
+  appState.analyticsUnit = event.target.value;
+  syncPeriodCountOptions();
+  loadAnalytics().catch((error) => showToast(error.message));
+});
+document.getElementById("period-count").addEventListener("change", (event) => {
+  appState.analyticsPeriods = Number(event.target.value);
+  loadAnalytics().catch((error) => showToast(error.message));
+});
+document.getElementById("period-tabs").addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-period-kind]");
+  if (!tab) return;
+  appState.analyticsKind = tab.dataset.periodKind;
+  document.querySelectorAll("#period-tabs [data-period-kind]").forEach((button) => button.classList.toggle("active", button === tab));
+  renderItemPeriods();
+});
+document.getElementById("target-unit").addEventListener("change", renderTargetSheets);
+document.getElementById("target-date").addEventListener("change", renderTargetSheets);
+document.getElementById("export-targets").addEventListener("click", exportTargetSheet);
 document.getElementById("analytics-scope").addEventListener("change", (event) => {
   appState.analyticsScope = event.target.value;
   loadAnalytics().catch((error) => showToast(error.message));
