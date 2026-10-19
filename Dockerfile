@@ -10,6 +10,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# The slim base ships no zone database, so a TZ setting would silently fall back to UTC and shift every day boundary by hours.
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --no-cache-dir --disable-pip-version-check -r /app/requirements.txt
 

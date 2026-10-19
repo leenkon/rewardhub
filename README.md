@@ -38,10 +38,11 @@ docker compose up -d
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PORT` | `9696` | 监听端口 |
+| `PORT` | `9696` | 监听端口；compose 的端口映射同步跟随 |
+| `TZ` | `Asia/Shanghai`（compose 默认） | 容器时区，决定「今天」从几点翻页；直接 `docker run` 时需要自己传 |
 | `DATA_DIR` | 程序目录下的 `data`（镜像内为 `/data`） | 数据目录 |
 | `DATABASE_PATH` | `<DATA_DIR>/points.db` | 数据库文件位置，仅用于把库放到数据目录之外 |
-| `SECRET_KEY` | 内置占位值 | 会话签名密钥，公网或多实例部署时必须设置为自定义值 |
+| `SECRET_KEY` | 首次启动随机生成，存为 `<DATA_DIR>/secret_key` | 会话签名密钥；多实例共用同一份数据时才需要显式设置成同一个值 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 空 | 写入后按「安装凭据」一节处理，会覆盖现有管理员 |
 | `ADMIN_USERNAME_B64` / `ADMIN_PASSWORD_B64` | 空 | 上一项的 Base64 形式，优先读取；适配会改写 `$`、`#`、引号的 NAS 环境文件 |
 

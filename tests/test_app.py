@@ -2325,6 +2325,54 @@ class PointsManagerApiTests(unittest.TestCase):
         self.client.post("/api/auth/login", json={"username": "kid-export", "password": "child123"})
         self.assertEqual(self.client.post("/api/targets/export", json=payload).status_code, 403)
 
+    def test_target_sheet_export_survives_untypeable_characters(self):
+        # Item names and nicknames arrive from the browser, and XML 1.0 refuses to carry the control codes a paste can bring with them.
+        payload = {
+            "unit": "week",
+            "date": date.today().isoformat(),
+            "range": "本周 \x0b10/19 ~ 10/25",
+            "heads": [["项目\x02", "目标", "一"], ["", "", "10/19"]],
+            "sheets": [{"name": "小明\x07", "rows": [["阅读\x00", "每周3次"]]}],
+        }
+        response = self.client.post("/api/targets/export", json=payload)
+        self.assertEqual(response.status_code, 200)
+        archive = zipfile.ZipFile(io.BytesIO(response.data))
+        for part in archive.namelist():
+            ElementTree.fromstring(archive.read(part))
+
+    def test_duplicate_tab_names_stay_inside_excel_limits(self):
+        used: set[str] = set()
+        names = [self.app_module.xlsx_tab_name("重复的孩子名字" * 6, index, used) for index in range(1, 13)]
+        self.assertTrue(all(len(name) <= 31 for name in names), names)
+        self.assertEqual(len({name.lower() for name in names}), len(names))
+
+    def test_number_fields_reject_values_sqlite_cannot_store(self):
+        self.create_child(username="kid-bounds")
+        for payload, hint in (
+            ({"kind": "earn", "name": "整理房间", "item_id": "abc"}, "项目"),
+            ({"kind": "earn", "name": "整理房间", "points": 10 ** 30}, "积分"),
+            ({"kind": "exchange", "reward_id": 10 ** 30}, "项目"),
+        ):
+            response = self.client.post("/api/transactions", json=payload)
+            self.assertEqual(response.status_code, 400, payload)
+            error = response.get_json()["error"]
+            self.assertIn(hint, error)
+            # The interpreter's own wording must never reach a child's screen.
+            self.assertNotIn("int()", error)
+
+    def test_oversized_request_still_answers_in_json(self):
+        response = self.client.post("/api/transactions", json={"kind": "earn", "name": "x" * 2_000_000})
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.get_json()["error"], "提交内容过大，请减少后重试")
+
+    def test_session_key_is_created_once_and_reused(self):
+        # A published placeholder key would let anyone forge an admin cookie, so an unset key has to be unpredictable and stable.
+        module = self.app_module
+        first = module.generated_secret_key()
+        self.assertEqual(len(first), 64)
+        self.assertEqual(first, module.generated_secret_key())
+        self.assertEqual((module.DATA_DIR / "secret_key").read_text(encoding="utf-8").strip(), first)
+
     def test_recent_flow_lists_gains_and_losses(self):
         child = self.create_child()
         self.client.post("/api/transactions", json={"kind": "earn", "points": 12, "name": "整理房间"})

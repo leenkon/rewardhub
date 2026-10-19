@@ -30,8 +30,27 @@ else:
     DEFAULT_DATA_DIR = BASE_DIR / "data"
 DATA_DIR = Path(os.getenv("DATA_DIR") or DEFAULT_DATA_DIR)
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH") or DATA_DIR / "points.db")
+
+
+def generated_secret_key() -> str:
+    """A source-published key would let anyone forge an admin cookie, so a missing one is created once and kept beside the data."""
+    key_file = DATA_DIR / "secret_key"
+    try:
+        stored = key_file.read_text(encoding="utf-8").strip() if key_file.is_file() else ""
+        if stored:
+            return stored
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        fresh = secrets.token_hex(32)
+        key_file.write_text(fresh, encoding="utf-8")
+        key_file.chmod(0o600)
+        return fresh
+    except OSError:
+        # A read-only data directory must not block boot; such an install simply re-issues logins each start.
+        return secrets.token_hex(32)
+
+
 # Compose forwards "${SECRET_KEY:-}", so an unset value arrives as an empty string rather than missing.
-SECRET_KEY = os.getenv("SECRET_KEY") or "change-this-secret-key-in-production"
+SECRET_KEY = os.getenv("SECRET_KEY") or generated_secret_key()
 PASSWORD_ITERATIONS = 240_000
 APP_VERSION = "0.8.9"
 AVATAR_OPTIONS = {"boy", "girl", "adult-male", "adult-female"}
@@ -186,6 +205,8 @@ app.config.update(
     SECRET_KEY=SECRET_KEY,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    # Nothing in this app uploads files, so a body this large is already past any legitimate form.
+    MAX_CONTENT_LENGTH=1024 * 1024,
 )
 
 
@@ -813,11 +834,22 @@ def valid_date(value: Any) -> str:
         raise ValueError("日期格式必须为 YYYY-MM-DD") from exc
 
 
-def positive_int(value: Any, label: str = "积分") -> int:
+# SQLite binds integers as 64-bit; anything wider would raise OverflowError inside the query instead of returning a message.
+INT_FIELD_LIMIT = 2 ** 63 - 1
+
+
+def int_field(value: Any, label: str) -> int:
     try:
         number = int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label}必须是整数") from exc
+    if abs(number) > INT_FIELD_LIMIT:
+        raise ValueError(f"{label}超出可填写范围")
+    return number
+
+
+def positive_int(value: Any, label: str = "积分") -> int:
+    number = int_field(value, label)
     if number <= 0:
         raise ValueError(f"{label}必须大于 0")
     return number
@@ -826,20 +858,14 @@ def positive_int(value: Any, label: str = "积分") -> int:
 def non_negative_int(value: Any, label: str) -> int:
     if value in (None, ""):
         return 0
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{label}必须是整数") from exc
+    number = int_field(value, label)
     if number < 0:
         raise ValueError(f"{label}不能为负数")
     return number
 
 
 def signed_int(value: Any, label: str = "积分") -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{label}必须是整数") from exc
+    return int_field(value, label)
 
 
 def rule_flag(value: Any) -> int:
@@ -2120,6 +2146,8 @@ REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 QUOTE_ATTRS = {'"': "&quot;"}
+# escape() only handles the markup characters; XML 1.0 additionally forbids these control codes, which a pasted item name can carry.
+XML_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 # Style slots used by the target sheet: 0 default, 1 title, 2 head cell, 3 name cell, 4 bordered box.
 XLSX_STYLES = (
     f'{XML_HEADER}<styleSheet xmlns="{SHEET_NS}">'
@@ -2163,7 +2191,7 @@ def xlsx_column(index: int) -> str:
 
 
 def xlsx_text_cell(ref: str, text: str, style: int) -> str:
-    return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{escape(text)}</t></is></c>'
+    return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{escape(XML_CONTROL_CHARS.sub("", text))}</t></is></c>'
 
 
 def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) -> str:
@@ -2202,13 +2230,14 @@ def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) ->
 
 
 def xlsx_tab_name(raw: str, index: int, used: set[str]) -> str:
-    """Excel forbids a handful of characters in a tab name and caps it at 31 characters."""
-    name = re.sub(r"[\\/*?:\[\]]", "_", raw).strip().strip(".")[:31] or f"孩子{index}"
+    """Excel forbids a handful of characters in a tab name, caps it at 31 characters, and reads two names differing only in case as one sheet."""
+    name = re.sub(r"[\\/*?:\[\]]", "_", XML_CONTROL_CHARS.sub("_", raw)).strip().strip(".")[:31] or f"孩子{index}"
     base, step = name, 1
-    while name in used:
-        name = f"{base[:28]}({step})"
+    while name.lower() in used:
+        # The counter has to fit inside the same 31 characters as the name it decorates.
+        name = f"{base[:29 - len(str(step))]}({step})"
         step += 1
-    used.add(name)
+    used.add(name.lower())
     return name
 
 
@@ -3251,7 +3280,7 @@ def create_transaction():
             raw_item_id = payload.get("item_id")
             if raw_item_id is None:
                 raw_item_id = payload.get("reward_id")
-            item_id = int(raw_item_id) if raw_item_id is not None else None
+            item_id = positive_int(raw_item_id, "项目") if raw_item_id not in (None, "") else None
             if kind == "earn":
                 item = load_bound_item(conn, "earn", item_id, account_id, "赚取项目")
                 if item is not None:
@@ -3778,6 +3807,12 @@ def not_found(error):
     if request.path.startswith("/api/"):
         return api_error("接口不存在", 404)
     return error
+
+
+@app.errorhandler(413)
+def payload_too_large(error):
+    # Flask raises this before the view runs, so without this handler the client gets HTML where the SPA expects JSON.
+    return api_error("提交内容过大，请减少后重试", 413)
 
 
 init_db()

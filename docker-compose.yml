@@ -3,7 +3,7 @@ services:
     image: ghcr.io/leenkon/rewardhub:latest
     container_name: rewardhub
     ports:
-      - "9696:9696"
+      - "${PORT:-9696}:${PORT:-9696}"
     environment:
       ADMIN_USERNAME: "${ADMIN_USERNAME:-}"
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
@@ -12,6 +12,9 @@ services:
       SECRET_KEY: "${SECRET_KEY:-}"
       DATA_DIR: "${DATA_DIR:-/data}"
       DATABASE_PATH: "${DATABASE_PATH:-}"
+      PORT: "${PORT:-9696}"
+      # Day boundaries come from the container clock; unset TZ would settle "today" on UTC.
+      TZ: "${TZ:-Asia/Shanghai}"
     volumes:
       - ./points_data:/data
     restart: unless-stopped
