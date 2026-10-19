@@ -8,21 +8,21 @@
 
 - RewardHub（中文名「带娃神器」）：家庭积分管理工具，Flask 单文件后端 + 无构建步骤的原生 JS 单页前端。
 - 唯一运行时依赖是 `Flask==3.1.1`（`requirements.txt`）；数据库用标准库 `sqlite3`，无 ORM、无前端框架、无打包器。
-- 主代码集中在四个文件：`app.py`（约 3470 行，路由 + 表结构 + 结算逻辑）、`static/app.js`（约 1880 行，全部前端逻辑）、`templates/index.html`（SPA 外壳，约 300 行）、`tests/test_app.py`（单测套件，约 2380 行）。
+- 主代码集中在四个文件：`app.py`（约 3790 行，路由 + 表结构 + 结算逻辑）、`static/app.js`（约 2055 行，全部前端逻辑）、`templates/index.html`（SPA 外壳，约 310 行）、`tests/test_app.py`（单测套件，约 2460 行）。
 - 本机解释器是 Python 3.14，CI 用 3.12（`.github/workflows/publish-image.yml`），改动必须在 3.12 上可运行。
 
 ### 架构与核心文件
 
-- 后端：39 个 `@app.get/post/put/delete/route` 装饰的路由全部在 `app.py`，按域排布——auth/setup、accounts、`/api/state`、transactions（录入与补录）、items（项目库、绑定、停用、排序）、tasks（悬赏）、announcements、requests（审核）、analytics、settlements（期次与结算）、system。
-- 数据层：裸 SQL。`connection()`（`app.py:179`）是每请求的上下文管理器，负责 `row_factory = sqlite3.Row` 和 `PRAGMA foreign_keys = ON`；建表与升级全在 `init_db()`（`app.py:451`）里——`CREATE TABLE IF NOT EXISTS` 加 `migrate_*()` / `ensure_*()` 幂等补列补索引，模块末尾在 import 时执行 `init_db()`。
-- 结算：`AUTO_SETTLEMENT_SOURCES`（`app.py:153`）列出 9 个结算 `source`，分为「目标窗口族」（`weekly_bonus` / `weekly_penalty` / `target_streak` / `over_cap_penalty`，有 `weekly_settlements` 水位表）与「连续扣分族」（`deduct_{day,week,month,quarter,year}_streak`，无水位、靠 `records_settlement_once` 部分唯一索引兜底）。哪些记录参与计数由 `EARN_COMPLETION_FILTER` / `DEDUCT_COMPLETION_FILTER`（`app.py:133`）决定；只有「天」档随页面实时结算，其余档位靠首页「手动结算」。
+- 后端：40 个 `@app.get/post/put/delete/route` 装饰的路由全部在 `app.py`，按域排布——auth/setup、accounts、`/api/state`、transactions（录入与补录）、items（项目库、绑定、停用、排序）、tasks（悬赏）、announcements、requests（审核）、analytics（含 `/api/targets/export` 目标表工作簿）、settlements（期次与结算）、system。
+- 数据层：裸 SQL。`connection()`（`app.py:193`）是每请求的上下文管理器，负责 `row_factory = sqlite3.Row` 和 `PRAGMA foreign_keys = ON`；建表与升级全在 `init_db()`（`app.py:465`）里——`CREATE TABLE IF NOT EXISTS` 加 `migrate_*()` / `ensure_*()` 幂等补列补索引，模块末尾在 import 时执行 `init_db()`。
+- 结算：`AUTO_SETTLEMENT_SOURCES`（`app.py:167`）列出 9 个结算 `source`，分为「目标窗口族」（`weekly_bonus` / `weekly_penalty` / `target_streak` / `over_cap_penalty`，有 `weekly_settlements` 水位表）与「连续扣分族」（`deduct_{day,week,month,quarter,year}_streak`，无水位、靠 `records_settlement_once` 部分唯一索引兜底）。哪些记录参与计数由 `EARN_COMPLETION_FILTER` / `DEDUCT_COMPLETION_FILTER`（`app.py:147`）决定；只有「天」档随页面实时结算，其余档位靠首页「手动结算」。
 - 认证与会话：`password_hash()` 用 PBKDF2-HMAC-SHA256 240k 迭代；`require_admin` / `current_user()` / `active_child_id()` 构成角色门控，孩子只能看到自己与被绑定的项目。
-- 前端：单个 `appState` 全局对象 + 逐面板 `renderX()` 重绘；`api()`（`static/app.js:185`）封装 fetch 并把 `payload.error` 抛成 `Error`；所有拼进 `innerHTML` 的值必须过 `escapeHtml()`。
-- 版本与缓存：`APP_VERSION`（`app.py:32`）是版本号单一来源，`templates/index.html` 把它作为所有静态资源的 `?v=` 缓存串——不 bump 版本号，客户端会继续用旧 JS/CSS。
+- 前端：单个 `appState` 全局对象 + 逐面板 `renderX()` 重绘；`api()`（`static/app.js:188`）封装 fetch 并把 `payload.error` 抛成 `Error`；所有拼进 `innerHTML` 的值必须过 `escapeHtml()`。
+- 版本与缓存：`APP_VERSION`（`app.py:36`）是版本号单一来源，`templates/index.html` 把它作为所有静态资源的 `?v=` 缓存串——不 bump 版本号，客户端会继续用旧 JS/CSS。
 
 ### 关键配置文件
 
-- 环境变量：`DATA_DIR`、`DATABASE_PATH`、`PORT`、`SECRET_KEY`、`ADMIN_USERNAME(_B64)`、`ADMIN_PASSWORD(_B64)`。读取一律写成 `os.getenv("X") or 默认值`（`app.py:27-30`），因为 compose 用 `"${VAR:-}"` 转发时未设置的变量在容器里是**空串**而非缺失，带第二参数的 `getenv` 不会回退。新增变量要同时改 `docker-compose.yml` 的 `environment:` 和 README 的环境变量表，三处缺一处就静默失效。
+- 环境变量：`DATA_DIR`、`DATABASE_PATH`、`PORT`、`SECRET_KEY`、`ADMIN_USERNAME(_B64)`、`ADMIN_PASSWORD(_B64)`。读取一律写成 `os.getenv("X") or 默认值`（`app.py:31-34`），因为 compose 用 `"${VAR:-}"` 转发时未设置的变量在容器里是**空串**而非缺失，带第二参数的 `getenv` 不会回退。新增变量要同时改 `docker-compose.yml` 的 `environment:` 和 README 的环境变量表，三处缺一处就静默失效。
 - `docker-compose.yml` 是交付物本身（用户复制到部署目录再用），端口 `9696`、数据卷 `./points_data:/data`。
 - `Dockerfile` 里 `COPY app.py` / `COPY templates` / `COPY static` 三条不能合并：多源 COPY 会把目录内容平铺进目标，`static/app.js` 会变成 `/app/app.js`，前端路径全废。
 - `.dockerignore` 排除 `tests/`、`data/`、`.git/`。`static/illustrations/ATTRIBUTIONS.md` 是 CC-BY 署名的固化要求，必须留在 `static/` 里。
@@ -34,7 +34,7 @@
 ```bash
 pip install -r requirements.txt          # 运行时依赖
 python app.py                            # 本地起服务，默认 http://127.0.0.1:9696
-python -m unittest discover -s tests -q  # 单测，当前 78 条，必须全绿
+python -m unittest discover -s tests -q  # 单测，当前 79 条，必须全绿
 python -m py_compile app.py              # 语法检查
 git diff --check                         # 空白检查（make check = 上面三条 + 单测）
 make release VERSION=x.y.z               # check → bump-version → changelog → check
@@ -49,7 +49,8 @@ make binary / make binary-package        # PyInstaller 打包，见 BINARY_DEPLO
 ### 代码风格与约定
 
 - Python：文件头 `from __future__ import annotations`，函数带类型标注。可复用的 SQL 片段和文案提成模块级常量字典（`ITEM_TABLES`、`CAP_PERIOD_LABELS`、`SETTLEMENT_SOURCE_PREDICATE`），避免同一谓词在两处各写一遍。注释只写非显然的「为什么」（例如为什么索引 WHERE 必须和 upsert 冲突目标文本一致），不写代码在做什么。
-- 报错：API 统一 `return api_error("中文提示", 状态码)`（`app.py:2293`）；前端直接把 `error` 字段弹给用户，所以提示要可执行、是中文、不泄露堆栈。
+- 报错：API 统一 `return api_error("中文提示", 状态码)`（`app.py:2579`）；前端直接把 `error` 字段弹给用户，所以提示要可执行、是中文、不泄露堆栈。
+- 文件导出：页面已经渲染好的东西（目标表）由前端把措辞与列结构随请求交给后端，后端只用 `xlsx_workbook()` 写工作簿——标准库 `zipfile` 手写最小 OOXML，不为此新增依赖，也不要用 Python 复写一遍周期与文案口径；下载文件名以服务端 `Content-Disposition` 为准。
 - 用户可见文案：标签 2-3 字，说明不复述标题，按钮去掉冗余动词，但保留功能术语。界面已于 2026-10-12 定稿冻结——不主动提改版，改动只限用户点名的控件。全新库的加/扣/兑换项目表必须为空，不要重新引入默认项目或示例数据。
 - 前端：函数命名沿用 `render*` / `handle*` / `api`；字符串用双引号；列表重排用 ⠿ 手柄 + pointer 事件；下拉只列当前真实可用的候选项。
 - 测试：`unittest`。`setUpModule()` 先在临时目录设好 `DATA_DIR` / `DATABASE_PATH` 才 `import app`——任何要碰库的用例都必须照这个顺序，否则 import 期的 `init_db()` 会写到真实库。规则类改动要同时补结算与角标断言，并把测试条数变化写进 CHANGELOG。
