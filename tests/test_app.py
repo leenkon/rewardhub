@@ -348,7 +348,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.create_child(username="child", display_name="小朋友")
         earn_id = self.create_item("earn", "完成作业", 10)
         state = self.state()
-        self.assertEqual(state["version"], "0.8.11")
+        self.assertEqual(state["version"], "0.8.12")
         self.assertEqual(state["user"]["avatar"], "adult-male")
         self.assertEqual(state["active_child"]["avatar"], "boy")
 
@@ -1370,6 +1370,9 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertIn("那周", periods[1]["label"])
         self.assertEqual(self.client.get("/api/settlements/periods?unit=day").status_code, 400)
         self.assertEqual(self.client.get("/api/settlements/periods?unit=decade").status_code, 400)
+        # 「全部周期」 has no window to name, so it offers one catch-up entry and never claims a period is settled.
+        all_periods = self.client.get("/api/settlements/periods?unit=all").get_json()["periods"]
+        self.assertEqual([(row["start"], row["closed"], row["settled"]) for row in all_periods], [("", True, False)])
 
         # Day rules settle with the page, an open window is not gradeable, and a regrade needs somewhere to start.
         self.assertEqual(self.client.post("/api/settlements/run", json={"unit": "day"}).status_code, 400)
@@ -1378,6 +1381,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(open_week.status_code, 400)
         self.assertIn("尚未结束，不能结算", open_week.get_json()["error"])
         self.assertEqual(self.client.post("/api/settlements/run", json={"unit": "week", "force": True}).status_code, 400)
+        self.assertEqual(self.client.post("/api/settlements/run", json={"unit": "all", "period": "2026-01-05"}).status_code, 400)
 
         self.create_child()
         self.client.post("/api/auth/logout")
@@ -1387,6 +1391,42 @@ class PointsManagerApiTests(unittest.TestCase):
 
     def streak_records(self, source):
         return [row for row in self.state()["records"] if row["source"] == source]
+
+    def test_settle_all_unit_catches_up_windows_of_every_unit(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        app = self.app_module
+        weekly = self.client.post(
+            "/api/items/earn", json={"name": "周结项目", "points": 5, "icon": "book.svg", "week_target": 2, "week_bonus": 3}
+        ).get_json()
+        month_start = app.period_start("month", date.today().isoformat())
+        previous_month = app.period_shift("month", 1, month_start, -1)
+        monthly = self.client.post(
+            "/api/items/earn",
+            json={"name": "月结项目", "points": 5, "icon": "book.svg", "week_target": 2, "week_bonus": 4, "target_unit": "month"},
+        ).get_json()
+        self.backdate_rule(weekly["id"], self.monday(2))
+        self.backdate_rule(monthly["id"], date.fromisoformat(previous_month))
+        self.grant(weekly["id"], weeks_back=1, times=3)
+        log_day = (date.fromisoformat(previous_month) + timedelta(days=1)).isoformat()
+        for _ in range(3):
+            self.assertEqual(
+                self.client.post("/api/transactions", json={"kind": "earn", "item_id": monthly["id"], "date": log_day}).status_code,
+                201,
+            )
+
+        # One 「全部周期」 run closes both windows, so the admin never has to walk the unit dropdown.
+        self.assertEqual(self.settle("all")["settlement"]["entries"], 2)
+        self.assertEqual(
+            [(row["week_start"], row["bonus"]) for row in self.settlement_rows(weekly["id"])],
+            [(self.monday(1).isoformat(), 3)],
+        )
+        self.assertEqual(
+            [(row["week_start"], row["bonus"]) for row in self.settlement_rows(monthly["id"])],
+            [(previous_month, 4)],
+        )
+        self.client.delete(f"/api/items/earn/{weekly['id']}")
+        self.client.delete(f"/api/items/earn/{monthly['id']}")
 
     def test_target_streak_pays_after_weeks_on_target(self):
         child = self.create_child()
@@ -1596,7 +1636,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(settled["total_points"], -14)
         self.client.delete(f"/api/items/deduct/{item['id']}")
 
-    def test_earn_streak_penalizes_consecutive_missed_windows(self):
+    def test_earn_streak_award_and_fine_coexist(self):
         child = self.create_child()
         self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
         item = self.client.post(
@@ -1606,22 +1646,34 @@ class PointsManagerApiTests(unittest.TestCase):
                 "points": 5,
                 "icon": "book.svg",
                 "week_target": 2,
-                "streak_weeks": 2,
-                "streak_bonus": -5,
+                "streak_weeks": 3,
+                "streak_bonus": 10,
+                "streak_penalty_weeks": 2,
+                "streak_penalty": 5,
             },
         ).get_json()
-        self.assertEqual((item["streak_weeks"], item["streak_bonus"]), (2, -5))
+        self.assertEqual(
+            (item["streak_weeks"], item["streak_bonus"], item["streak_penalty_weeks"], item["streak_penalty"]),
+            (3, 10, 2, 5),
+        )
         self.assertEqual(
             self.client.post(
                 "/api/items/earn",
-                json={"name": "缺目标", "points": 5, "icon": "book.svg", "streak_weeks": 2, "streak_bonus": -5},
+                json={"name": "缺目标", "points": 5, "icon": "book.svg", "streak_penalty_weeks": 2, "streak_penalty": 5},
             ).status_code,
             400,
         )
         self.assertEqual(
             self.client.post(
                 "/api/items/earn",
-                json={"name": "缺期数", "points": 5, "icon": "book.svg", "week_target": 2, "streak_bonus": -5},
+                json={"name": "缺期数", "points": 5, "icon": "book.svg", "week_target": 2, "streak_penalty": 5},
+            ).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/items/earn",
+                json={"name": "负值奖励", "points": 5, "icon": "book.svg", "week_target": 2, "streak_bonus": -5},
             ).status_code,
             400,
         )
@@ -1634,17 +1686,31 @@ class PointsManagerApiTests(unittest.TestCase):
         )
 
         self.backdate_rule(item["id"], self.monday(2))
-        # One grant in each of the last two weeks misses the two-per-week target both times.
+        # One grant in each of the last two weeks misses the two-per-week target both times, so only the fine chain runs.
         self.grant(item["id"], weeks_back=2)
         self.grant(item["id"], weeks_back=1)
         self.settle()
-        payouts = self.streak_records("target_streak")
         self.assertEqual(
-            [(row["title"], row["amount"], row["type"]) for row in payouts],
+            [(row["title"], row["amount"], row["type"]) for row in self.streak_records("target_streak_penalty")],
             [("连续缺练 连续 2 期", -5, "expense")],
         )
-        self.assertEqual(self.state()["total_points"], 2 * 5 - 5)
-        self.client.delete(f"/api/items/earn/{item['id']}")
+        self.assertEqual(self.streak_records("target_streak"), [])
+
+    def test_upgrade_moves_a_negative_streak_bonus_into_the_fine(self):
+        item_id = self.client.post(
+            "/api/items/earn",
+            json={"name": "老规则", "points": 5, "icon": "book.svg", "week_target": 2, "streak_weeks": 2, "streak_bonus": 5},
+        ).get_json()["id"]
+        with type(self).connection() as conn:
+            # An install from before the fine had its own columns stored it as a negative award.
+            conn.execute("UPDATE earn_items SET streak_bonus = -5 WHERE id = ?", (item_id,))
+            self.app_module.ensure_item_schema(conn)
+            row = conn.execute(
+                "SELECT streak_weeks, streak_bonus, streak_penalty_weeks, streak_penalty FROM earn_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+        self.assertEqual(tuple(row), (2, 0, 2, 5))
+        self.client.delete(f"/api/items/earn/{item_id}")
 
     def test_weekly_rule_validation_and_deactivation(self):
         child = self.create_child()
@@ -2525,6 +2591,38 @@ class ItemLibraryMigrationTests(unittest.TestCase):
                     "INSERT INTO records(account_id, item_kind, item_id, date, time, source) "
                     "VALUES (2, 'earn', 7, '2026-08-30', '00:09', 'earn')"
                 )
+
+    def test_upgrade_rebuilds_the_payout_index_when_a_source_joins(self):
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "points.db"
+            with contextlib.closing(sqlite3.connect(database)) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute(
+                    "CREATE TABLE records ("
+                    "id INTEGER PRIMARY KEY, account_id INTEGER, item_kind TEXT, "
+                    "item_id INTEGER, date TEXT, source TEXT)"
+                )
+                # An older release built the guard without the fine's source; IF NOT EXISTS alone would leave it unguarded.
+                conn.execute(
+                    "CREATE UNIQUE INDEX records_settlement_once ON records(account_id, item_kind, item_id, date, source)"
+                    " WHERE source IN ('weekly_bonus', 'target_streak')"
+                )
+                app_module.ensure_settlement_uniqueness(conn)
+                stored = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'records_settlement_once'"
+                ).fetchone()["sql"]
+                self.assertIn(app_module.TARGET_STREAK_PENALTY_SOURCE, stored)
+                conn.execute(
+                    "INSERT INTO records(account_id, item_kind, item_id, date, source) "
+                    "VALUES (2, 'earn', 7, '2026-08-30', 'target_streak_penalty')"
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        "INSERT INTO records(account_id, item_kind, item_id, date, source) "
+                        "VALUES (2, 'earn', 7, '2026-08-30', 'target_streak_penalty')"
+                    )
 
 
 if __name__ == "__main__":

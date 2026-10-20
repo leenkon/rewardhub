@@ -654,8 +654,9 @@ function ruleSummary(item, kind) {
   if (item.streak_bonus) {
     const amount = Number(item.streak_bonus);
     if (deduct) parts.push(`连续${item.streak_weeks}${UNIT_MULTI_TEXT[item.streak_unit] || "周"}额外-${amount}`);
-    else parts.push(`连续${item.streak_weeks}期${amount > 0 ? `达标+${amount}` : `未达标${amount}`}`);
+    else parts.push(`连续${item.streak_weeks}期达标额外+${amount}`);
   }
+  if (item.streak_penalty) parts.push(`连续${item.streak_penalty_weeks}期未达标额外-${item.streak_penalty}`);
   if (CAP_PERIOD_TEXT[item.cap_period]) parts.push(`${CAP_PERIOD_TEXT[item.cap_period]}限 ${item.cap_count || 1} 次`);
   if (item.count_days_once) parts.push("同一天多次只算 1 次");
   return parts.join(" · ");
@@ -947,13 +948,10 @@ const RECORD_SOURCE_LABEL = {
   weekly_bonus: "达标奖励",
   weekly_penalty: "未达标",
   over_cap_penalty: "超额扣分",
+  target_streak: "连续达标",
+  target_streak_penalty: "连续未达标",
 };
 ["day", "week", "month", "quarter", "year"].forEach((unit) => { RECORD_SOURCE_LABEL[`deduct_${unit}_streak`] = "连续扣分"; });
-
-function recordSourceLabel(record) {
-  if (record.source === "target_streak") return Number(record.amount) > 0 ? "连续达标" : "连续未达标";
-  return RECORD_SOURCE_LABEL[record.source] || "";
-}
 
 function renderRecords() {
   const weekGrid = document.getElementById("records-week-grid");
@@ -962,7 +960,7 @@ function renderRecords() {
   document.getElementById("selected-day-title").textContent = `${appState.selectedDate} 每日记录`;
   const records = recordsFor(appState.selectedDate);
   document.getElementById("day-records").innerHTML = records.length ? records.map((record) => {
-    const label = recordSourceLabel(record);
+    const label = RECORD_SOURCE_LABEL[record.source] || "";
     return `<div class="record-row"><div><strong>${escapeHtml(record.title)}</strong>${label ? `<span class="record-source">${label}</span>` : ""}<span>${escapeHtml(record.time)}</span></div><strong class="record-amount ${record.type}">${entryAmountText(record)}</strong>${appState.data.user.role === "admin" ? `<button class="button button-small button-outline-danger" data-action="undo" data-id="${record.id}" type="button">撤销</button>` : ""}</div>`;
   }).join("") : `<div class="empty-state">当日无积分记录</div>`;
   renderHistory();
@@ -1337,9 +1335,8 @@ async function exportTargetSheet() {
   }
 }
 
-const RULE_FIELDS = ["week_target", "week_bonus", "week_penalty", "target_every", "bonus_every", "streak_weeks", "streak_bonus", "cap_count"];
+const RULE_FIELDS = ["week_target", "week_bonus", "week_penalty", "target_every", "bonus_every", "streak_weeks", "streak_bonus", "streak_penalty_weeks", "streak_penalty", "cap_count"];
 const RULE_DEFAULT_ONE = new Set(["target_every", "bonus_every", "cap_count"]);
-const RULE_NEGATIVE = new Set(["streak_bonus"]);
 const RULE_CHECKS = ["count_days_once"];
 const RULE_SELECTS = { cap_period: "", streak_unit: "week", target_unit: "week", target_measure: "count" };
 
@@ -1347,7 +1344,7 @@ function readRuleForm(form) {
   const rule = {};
   for (const field of RULE_FIELDS) {
     const value = Number(form.elements[field].value || 0);
-    if (!Number.isInteger(value) || (value < 0 && !RULE_NEGATIVE.has(field))) return null;
+    if (!Number.isInteger(value) || value < 0) return null;
     rule[field] = value;
   }
   RULE_CHECKS.forEach((field) => { rule[field] = form.elements[field].checked ? 1 : 0; });
@@ -1363,8 +1360,6 @@ function updateRuleUI() {
   panel.dataset.measure = quantity ? "quantity" : "count";
   // A quantity item's points are the completion score paid when the window closes, not a per-grant award.
   document.getElementById("points-field-label").textContent = quantity ? "完成分" : "积分";
-  // Only reward items may fine a losing streak, so the same field reads either "达标额外" or "未达标".
-  panel.dataset.streak = Number(panel.elements.streak_bonus.value) < 0 ? "penalty" : "award";
 }
 
 function openEditor(kind, id = null) {
@@ -1986,7 +1981,6 @@ document.getElementById("open-child-register").addEventListener("click", showChi
 document.getElementById("back-to-login").addEventListener("click", showLogin);
 document.getElementById("account-form").elements.role.addEventListener("change", (event) => fillAvatarOptions(event.target.value));
 document.getElementById("score-rule-fields").elements.target_measure.addEventListener("change", updateRuleUI);
-document.getElementById("score-rule-fields").elements.streak_bonus.addEventListener("input", updateRuleUI);
 document.querySelectorAll(".entry-context input[name='date']").forEach((input) => input.addEventListener("change", () => { renderEntryContext(); renderItemLists(); }));
 document.getElementById("adventure-level-form")?.elements.mode.addEventListener("change", (event) => {
   const level = document.getElementById("adventure-level-form")?.elements.level;
@@ -2060,9 +2054,10 @@ document.getElementById("settle-run").addEventListener("click", async () => {
   const unit = document.getElementById("settle-unit");
   const period = document.getElementById("settle-period").selectedOptions[0];
   const settled = period.dataset.settled === "1";
+  const scope = unit.value === "all" ? "各周期" : `${unit.selectedOptions[0].textContent}「${period.textContent}」起`;
   const ask = settled
     ? "该期已结算过，重算会撤销它已入账的奖惩，并连同其后各期按当前记录重算，确定吗？"
-    : `将结算全部孩子${unit.selectedOptions[0].textContent}「${period.textContent}」起的奖惩，确定吗？`;
+    : `将结算全部孩子${scope}的奖惩，确定吗？`;
   if (!await requestConfirm(ask, settled ? { title: "重新核算", confirmLabel: "重算" } : { title: "手动结算", confirmLabel: "结算", danger: false })) return;
   try {
     const data = await api("/api/settlements/run", { method: "POST", body: JSON.stringify({ unit: unit.value, period: period.value, force: settled }) });

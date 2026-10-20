@@ -8,14 +8,14 @@
 
 - RewardHub（中文名「带娃神器」）：家庭积分管理工具，Flask 单文件后端 + 无构建步骤的原生 JS 单页前端。
 - 唯一运行时依赖是 `Flask==3.1.1`（`requirements.txt`）；数据库用标准库 `sqlite3`，无 ORM、无前端框架、无打包器。
-- 主代码集中在四个文件：`app.py`（约 3850 行，路由 + 表结构 + 结算逻辑）、`static/app.js`（约 2075 行，全部前端逻辑）、`templates/index.html`（SPA 外壳，约 310 行）、`tests/test_app.py`（单测套件，约 2530 行）。
+- 主代码集中在四个文件：`app.py`（约 3900 行，路由 + 表结构 + 结算逻辑）、`static/app.js`（约 2070 行，全部前端逻辑）、`templates/index.html`（SPA 外壳，约 312 行）、`tests/test_app.py`（单测套件，约 2630 行）。
 - 本机解释器是 Python 3.14，CI 用 3.12（`.github/workflows/publish-image.yml`），改动必须在 3.12 上可运行。
 
 ### 架构与核心文件
 
 - 后端：40 个 `@app.get/post/put/delete/route` 装饰的路由全部在 `app.py`，按域排布——auth/setup、accounts、`/api/state`、transactions（录入与补录）、items（项目库、绑定、停用、排序）、tasks（悬赏）、announcements、requests（审核）、analytics（含 `/api/targets/export` 目标表工作簿）、settlements（期次与结算）、system。
-- 数据层：裸 SQL。`connection()`（`app.py:214`）是每请求的上下文管理器，负责 `row_factory = sqlite3.Row` 和 `PRAGMA foreign_keys = ON`；建表与升级全在 `init_db()`（`app.py:486`）里——`CREATE TABLE IF NOT EXISTS` 加 `migrate_*()` / `ensure_*()` 幂等补列补索引，模块末尾在 import 时执行 `init_db()`。
-- 结算：`AUTO_SETTLEMENT_SOURCES`（`app.py:186`）列出 9 个结算 `source`，分为「目标窗口族」（`weekly_bonus` / `weekly_penalty` / `target_streak` / `over_cap_penalty`，有 `weekly_settlements` 水位表）与「连续扣分族」（`deduct_{day,week,month,quarter,year}_streak`，无水位、靠 `records_settlement_once` 部分唯一索引兜底）。哪些记录参与计数由 `EARN_COMPLETION_FILTER` / `DEDUCT_COMPLETION_FILTER`（`app.py:166`）决定；只有「天」档随页面实时结算，其余档位靠首页「手动结算」。
+- 数据层：裸 SQL。`connection()`（`app.py:222`）是每请求的上下文管理器，负责 `row_factory = sqlite3.Row` 和 `PRAGMA foreign_keys = ON`；建表与升级全在 `init_db()`（`app.py:494`）里——`CREATE TABLE IF NOT EXISTS` 加 `migrate_*()` / `ensure_*()` 幂等补列补索引，模块末尾在 import 时执行 `init_db()`。
+- 结算：`AUTO_SETTLEMENT_SOURCES`（`app.py:194`）列出 10 个结算 `source`，分为「目标窗口族」（`weekly_bonus` / `weekly_penalty` / `target_streak` / `target_streak_penalty` / `over_cap_penalty`，有 `weekly_settlements` 水位表）与「连续扣分族」（`deduct_{day,week,month,quarter,year}_streak`，无水位、靠 `records_settlement_once` 部分唯一索引兜底）。加分项目的「连续达标额外加」与「连续未达标扣」是两条独立链，各用自己的期数与分值，共用同一套目标窗口——负分值写法的旧数据由 `ensure_item_schema()` 一次性搬进 `streak_penalty*`。哪些记录参与计数由 `EARN_COMPLETION_FILTER` / `DEDUCT_COMPLETION_FILTER`（`app.py:170`）决定；只有「天」档随页面实时结算，其余档位靠首页「手动结算」，`#settle-unit` 的「全部周期」档是跨档位补结所有未结算窗口（`unit=all` 不接受期次，重算仍要逐档选）。**新增一个 source 必须同时重建 `records_settlement_once`**：索引谓词和 upsert 的冲突目标都由这份列表拼出，库里留旧谓词的索引会让已发布版本的结算写入直接报 `ON CONFLICT clause does not match ...`。
 - 认证与会话：`password_hash()` 用 PBKDF2-HMAC-SHA256 240k 迭代；`require_admin` / `current_user()` / `active_child_id()` 构成角色门控，孩子只能看到自己与被绑定的项目。没设 `SECRET_KEY` 时 `generated_secret_key()` 首次启动随机生成一份、存成 `DATA_DIR/secret_key`——源码里不留固定密钥，否则任何人都能签出管理员 cookie（升级后所有人要重新登录一次）。
 - 前端：单个 `appState` 全局对象 + 逐面板 `renderX()` 重绘；`api()`（`static/app.js:193`）封装 fetch 并把 `payload.error` 抛成 `Error`；所有拼进 `innerHTML` 的值必须过 `escapeHtml()`；周窗口一律从 `mondayOf()`（`static/app.js:81`）起算，别再各自 `getDay() || 7`。三条在途/竞态约束别回退：委托点击监听先置灰被点的按钮、`finally` 恢复（双击不会重复提交）；`loadAnalytics()` 靠自增的 `analyticsRequestId` 丢弃过期响应；`appState.settlePeriodUnit` 标记期次下拉属于哪个单位，与 `#settle-unit` 对不上时 `syncSettleRun()` 禁用结算。
 - 版本与缓存：`APP_VERSION`（`app.py:55`）是版本号单一来源，`templates/index.html` 把它作为所有静态资源的 `?v=` 缓存串——不 bump 版本号，客户端会继续用旧 JS/CSS。
@@ -34,7 +34,7 @@
 ```bash
 pip install -r requirements.txt          # 运行时依赖
 python app.py                            # 本地起服务，默认 http://127.0.0.1:9696
-python -m unittest discover -s tests -q  # 单测，当前 85 条，必须全绿
+python -m unittest discover -s tests -q  # 单测，当前 88 条，必须全绿
 python -m py_compile app.py              # 语法检查
 git diff --check                         # 空白检查（make check = 上面三条 + 单测）
 make release VERSION=x.y.z               # check → bump-version → changelog → check
@@ -49,7 +49,7 @@ make binary / make binary-package        # PyInstaller 打包，见 BINARY_DEPLO
 ### 代码风格与约定
 
 - Python：文件头 `from __future__ import annotations`，函数带类型标注。可复用的 SQL 片段和文案提成模块级常量字典（`ITEM_TABLES`、`CAP_PERIOD_LABELS`、`SETTLEMENT_SOURCE_PREDICATE`），避免同一谓词在两处各写一遍。注释只写非显然的「为什么」（例如为什么索引 WHERE 必须和 upsert 冲突目标文本一致），不写代码在做什么。
-- 报错：API 统一 `return api_error("中文提示", 状态码)`（`app.py:2608`）；前端直接把 `error` 字段弹给用户，所以提示要可执行、是中文、不泄露堆栈。Python 自己的英文原文（`int()` 那种）也算泄露，数字字段一律走 `positive_int` / `non_negative_int` / `signed_int`，它们共用 `int_field()` 的整数与 2^63 上限校验。
+- 报错：API 统一 `return api_error("中文提示", 状态码)`（`app.py:2678`）；前端直接把 `error` 字段弹给用户，所以提示要可执行、是中文、不泄露堆栈。Python 自己的英文原文（`int()` 那种）也算泄露，数字字段一律走 `positive_int` / `non_negative_int`，它们共用 `int_field()` 的整数与 2^63 上限校验；奖惩分值都填正数、方向由字段本身决定，不要再靠正负号表示方向（`signed_int` 已随这条规则删掉，旧负值数据在 `ensure_item_schema()` 里搬到罚则列）。
 - 文件导出：页面已经渲染好的东西（目标表）由前端把措辞与列结构随请求交给后端，后端只用 `xlsx_workbook()` 写工作簿——标准库 `zipfile` 手写最小 OOXML，不为此新增依赖，也不要用 Python 复写一遍周期与文案口径；下载文件名以服务端 `Content-Disposition` 为准。列宽与行高一律按内容算（`xlsx_auto_width()` / `xlsx_line_count()`，中日韩字符按两格估宽）——内容长度只有前端知道，写死宽度会让项目名折进固定行高被裁掉；WPS 不会像 Excel 那样自己撑高换行的行，`ht` + `customHeight` 必须显式写。
 - 用户可见文案：标签 2-3 字，说明不复述标题，按钮去掉冗余动词，但保留功能术语。界面已于 2026-10-12 定稿冻结——不主动提改版，改动只限用户点名的控件。全新库的加/扣/兑换项目表必须为空，不要重新引入默认项目或示例数据。
 - 前端：函数命名沿用 `render*` / `handle*` / `api`；字符串用双引号；列表重排用 ⠿ 手柄 + pointer 事件；下拉只列当前真实可用的候选项。
@@ -61,6 +61,6 @@ make binary / make binary-package        # PyInstaller 打包，见 BINARY_DEPLO
 - Git 仓库根是 `RewardHub/`（工作区根 `D:\My_Projects\taskManager` 只是容器目录）。主干 `main`，远程 `origin = https://github.com/leenkon/rewardhub.git`。
 - push 到 `main`（含空推送）或手动 `workflow_dispatch` 都会触发 `.github/workflows/publish-image.yml`：算下一版本 → bump 版本标记 → 写 CHANGELOG → 自动提交 `chore(release): vX [skip ci]` → 打 tag → 建 Release → 推 GHCR（`ghcr.io/leenkon/rewardhub`，每版 `X.Y.Z`、`vX.Y.Z`、`sha-<commit>` 三个别名加 `latest`）→ 构建 linux/windows 二进制。**也就是说「只是提交并推送」等于发版**；纯文档或脚本清理在推送前必须先问一句：① 带 `[skip ci]` 不发版，② 照常推顺带发版，③ 先不推攒到下次功能改动。
 - 除 CI 工作流外没有 lint / formatter 配置（无 `pyproject.toml`、`setup.cfg`、`.editorconfig`、ESLint、Prettier），也不要顺手引入。
-- 数据安全（最高优先级）：`data/points.db` 是用户日常在用的真实家庭库，9696 实例跑的就是它；`.gitignore` 已排除 `data/`、`points_data/`、`.env`，提交前确认这些没被 `git add -A` 带进来。复验只能用只读连接 `sqlite3.connect("file:...?mode=ro", uri=True)`；任何试跑都在临时副本上做，探针服务要独占端口（先 `netstat -ano | grep :<port>` 确认空闲）并显式设 `DATA_DIR`。写库必须由用户显式点名落点，且先复制一份 `points.bak-<用途>-<时间戳>.db` 再用单个 `BEGIN IMMEDIATE` 事务落笔。只想读改某个库字段时**不要 `import app`**。
+- 数据安全（最高优先级）：`data/points.db` 是用户日常在用的真实家庭库，9696 实例跑的就是它；`.gitignore` 已排除 `data/`、`points_data/`、`.env`，提交前确认这些没被 `git add -A` 带进来。复验只能用只读连接 `sqlite3.connect("file:...?mode=ro", uri=True)`；任何试跑都在临时副本上做，探针服务要独占端口（先 `netstat -ano | grep :<port>` 确认空闲）并显式设 `DATA_DIR`。写库必须由用户显式点名落点，且先复制一份 `points.bak-<用途>-<时间戳>.db` 再用单个 `BEGIN IMMEDIATE` 事务落笔。只想读改某个库字段时**不要 `import app`**；连「数一下某个模块级常量」也不要——在 `RewardHub/` 目录里 import 时 `DATA_DIR` 默认就指向 `data/`，`init_db()` 会顺手把真实库迁移成新 schema（2026-10-20 就这样给线上库加了两列并重建了结算索引）。取常量用 `grep` / `git show HEAD:app.py`，别 import。
 - 改 `templates/index.html` 必须重启进程才生效（Jinja 在启动时缓存模板），而 `static/` 每次读盘——不重启会出现「旧 DOM + 新 JS」的假 bug。原终端的 9696 实例由用户自己重启，不要代劳。
 - 本机 shell 限制（不是「无法验证」的借口）：PATH 里没有 `node` / `gh` / `docker` CLI，只有 `git` 和 `python`。JS 语法校验用 node-repl MCP 的 `node:vm`；Python 输出中文要 `PYTHONIOENCODING=utf-8`（控制台默认 GBK）；含中文的 curl 请求体要先落成 UTF-8 文件再 `--data-binary @file`；线上版本与镜像状态用 `api.github.com` / `ghcr.io` 匿名 REST 取证，镜像 tag 请求要带全四种 `Accept`，用逗号拼成单个 header。

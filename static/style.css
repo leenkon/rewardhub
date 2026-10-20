@@ -207,11 +207,12 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .score-rule:not([data-kind="deduct"]) .rule-deduct-only { display: none; }
 .score-rule[data-measure="quantity"] .rule-count-only { display: none; }
 .score-rule:not([data-measure="quantity"]) .rule-quantity-only { display: none; }
-.score-rule:not([data-streak="penalty"]) .rule-streak-penalty { display: none; }
-.score-rule[data-streak="penalty"] .rule-streak-award { display: none; }
+.rule-group { margin-top: 10px; padding-left: 9px; border-left: 2px solid var(--green-line); }
+.rule-group:first-of-type { margin-top: 2px; }
+.rule-group-title { display: block; margin-bottom: 1px; color: var(--green-dark); font-size: 11px; font-weight: 800; }
 .rule-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
-.rule-row:first-of-type { margin-top: 0; }
-.rule-label { flex: 0 0 56px; color: var(--ink); font-size: 11px; font-weight: 800; }
+.rule-row:first-of-type { margin-top: 2px; }
+.rule-label { flex: 0 0 40px; color: var(--ink); font-size: 11px; font-weight: 800; }
 .rule-row label { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; gap: 5px; margin: 0; color: var(--muted); font-size: 11px; font-weight: 750; }
 .rule-row input, .rule-row select { width: 40px; min-height: 30px; margin: 0; padding: 0 4px; font-size: 12px; text-align: center; }
 .rule-row select { width: auto; }
