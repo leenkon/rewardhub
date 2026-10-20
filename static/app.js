@@ -11,6 +11,7 @@ const appState = {
   announcementEditId: null,
   announcementPopupTimer: null,
   bindingChildId: null,
+  ruleSource: { earn: null, deduct: null },
   analytics: null,
   analyticsScope: "all",
   analyticsPieKind: "earn",
@@ -173,7 +174,7 @@ function updateCurrencyUi() {
   const input = document.querySelector("#currency-form input[name='points_per_yuan']");
   if (input && document.activeElement !== input) input.value = rate;
   const cashRate = document.getElementById("cash-exchange-rate");
-  if (cashRate) cashRate.textContent = `当前比例：${rate.toLocaleString("zh-CN")} 积分 = 1 元`;
+  if (cashRate) cashRate.textContent = `${rate.toLocaleString("zh-CN")} 积分 = 1 元`;
 }
 
 function levelBenefitText() {
@@ -227,7 +228,6 @@ function showApp() {
   document.getElementById("app-header").classList.remove("hidden");
   document.getElementById("app-shell").classList.remove("hidden");
   setBottomNavVisible(true);
-  document.getElementById("connection-state").textContent = "数据库已连接";
 }
 
 function showLogin() {
@@ -421,11 +421,7 @@ function renderHome() {
   ];
   document.getElementById("home-metrics").innerHTML = metrics.map(([label, value, unit, color]) => `<div class="metric-card ${color}"><span>${label}</span><strong>${escapeHtml(value)}</strong><small>${unit}</small></div>`).join("");
   const controlTitle = document.getElementById("control-center-title");
-  const controlSubtitle = document.getElementById("control-center-subtitle");
   if (controlTitle) controlTitle.textContent = hasChild ? `${account.display_name}的积分中枢` : "家庭积分中枢";
-  if (controlSubtitle) controlSubtitle.textContent = hasChild
-    ? (user.role === "admin" ? `${account.username || "孩子账号"} · 可执行家庭规则` : "完成任务赚积分，随时查看余额")
-    : "先创建孩子账号";
   const controlChildCount = document.getElementById("control-child-count");
   const controlTotalPoints = document.getElementById("control-total-points");
   const controlPendingCount = document.getElementById("control-pending-count");
@@ -543,6 +539,21 @@ function renderManagement() {
 
 const BINDING_KIND_LABELS = { earn: "加积分项目", deduct: "扣积分项目", reward: "兑换奖励" };
 
+function renderRuleSync() {
+  const target = Number(appState.bindingChildId);
+  const sources = (appState.data.children || []).filter((child) => Number(child.id) !== target);
+  ["earn", "deduct"].forEach((kind) => {
+    const box = document.querySelector(`.rule-sync[data-rule-kind="${kind}"]`);
+    if (!box) return;
+    box.classList.toggle("hidden", !sources.length || !libraryItems(kind).length);
+    const select = box.querySelector(".rule-sync-source");
+    select.innerHTML = sources.map((child) => `<option value="${child.id}">${escapeHtml(child.display_name)}</option>`).join("");
+    const remembered = sources.find((child) => Number(child.id) === appState.ruleSource[kind]) || sources[0];
+    appState.ruleSource[kind] = remembered ? Number(remembered.id) : null;
+    select.value = String(remembered?.id ?? "");
+  });
+}
+
 function renderBindingPanel() {
   const picker = document.getElementById("binding-children");
   const grid = document.getElementById("binding-grid");
@@ -553,6 +564,7 @@ function renderBindingPanel() {
     picker.innerHTML = "";
     grid.innerHTML = `<div class="empty-state">请先创建孩子账号</div>`;
     summary.textContent = "";
+    renderRuleSync();
     return;
   }
   const selected = children.some((child) => Number(child.id) === Number(appState.bindingChildId))
@@ -574,6 +586,34 @@ function renderBindingPanel() {
     return `<div class="binding-group"><h3>${BINDING_KIND_LABELS[kind]}<span class="binding-group-count">${boundCount}/${items.length}</span></h3>${pills || `<div class="empty-state">项目库为空</div>`}</div>`;
   }).join("");
   summary.textContent = excludedTotal ? `已排除 ${excludedTotal} 项` : "全部已绑定";
+  renderRuleSync();
+}
+
+// Rules are the per-child layer, so a copy stores the source child's effective rule for this one item onto the child selected above.
+async function copyRule(kind, itemId) {
+  const target = Number(appState.bindingChildId);
+  const source = Number(appState.ruleSource[kind]);
+  if (!target || !source) return;
+  try {
+    appState.data = await api(`/api/item-rules/${target}`, {
+      method: "PUT",
+      body: JSON.stringify({ action: "copy", kind, item_id: Number(itemId), copy_from: source }),
+    });
+    // The answer already carries the whole state, so a re-render is enough — no second fetch.
+    render();
+    showToast(`已把${childName(source)}的规则抄给${childName(target)}`);
+  } catch (error) { showToast(error.message); }
+}
+
+async function resetRule(kind, itemId) {
+  const target = Number(appState.bindingChildId);
+  if (!target) return;
+  try {
+    appState.data = await api(`/api/item-rules/${target}`, { method: "DELETE", body: JSON.stringify({ kind, item_id: Number(itemId) }) });
+    closeModal();
+    render();
+    showToast("已恢复为所有孩子共用的规则");
+  } catch (error) { showToast(error.message); }
 }
 
 async function toggleBinding(dataset) {
@@ -662,21 +702,28 @@ function ruleSummary(item, kind) {
   return parts.join(" · ");
 }
 
+function childName(id) {
+  return (appState.data.children || []).find((child) => Number(child.id) === Number(id))?.display_name || "孩子";
+}
+
 function renderManageList(elementId, items, kind) {
   const container = document.getElementById(elementId);
   if (!container) return;
   const isExpense = kind === "deduct" || kind === "reward";
   const childTotal = (appState.data.children || []).length;
-  container.innerHTML = items.length ? items.map((item) => {
+  const childId = appState.bindingChildId;
+  const source = kind === "reward" ? null : Number(appState.ruleSource[kind]) || null;
+  container.innerHTML = items.length ? items.map((base) => {
+    const item = effectiveItem(childId, kind, base);
     const bound = boundChildCount(kind, item.id);
-    const active = item.active !== false;
-    const chip = !active ? `<span class="bind-chip bind-chip-off">已停用</span>` : childTotal ? `<span class="bind-chip${bound === childTotal ? "" : " bind-chip-partial"}">已绑定 ${bound}/${childTotal}</span>` : `<span class="bind-chip bind-chip-partial">暂无孩子账号</span>`;
+    const chip = childTotal ? `<span class="bind-chip${bound === childTotal ? "" : " bind-chip-partial"}">已绑定 ${bound}/${childTotal}</span>` : `<span class="bind-chip bind-chip-partial">暂无孩子账号</span>`;
+    const ownChip = ruleOverrideOf(childId, kind, item.id) ? `<span class="bind-chip bind-chip-own">${escapeHtml(childName(childId))}的规则</span>` : "";
     const rule = kind === "reward" ? "" : ruleSummary(item, kind);
     const pointsNote = isQuantityItem(item, kind) ? "" : `<span class="item-points ${isExpense ? "expense" : "income"}">${isExpense ? "-" : "+"}${pointsText(Math.abs(Number(item.points)))}</span>`;
     const handle = `<button class="drag-handle" type="button" aria-label="拖动排序">⠿</button>`;
-    const toggleText = active ? "停用" : "启用";
-    const editToggleDelete = `<button class="button button-small button-outline" data-action="edit" data-kind="${kind}" data-id="${item.id}" type="button">编辑</button><button class="button button-small button-outline" data-action="toggle-item" data-kind="${kind}" data-id="${item.id}" type="button">${toggleText}</button><button class="button button-small button-outline-danger" data-action="delete" data-kind="${kind}" data-id="${item.id}" type="button">删除</button>`;
-    return `<div class="list-row manage-row${active ? "" : " row-off"}" data-kind="${kind}" data-id="${item.id}"><div class="item-info">${handle}<div class="project-visual-wrap">${iconMarkup(item.icon, kind)}</div><div><div class="item-head"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><div class="row-actions">${editToggleDelete}</div></div><div class="item-meta">${chip}${pointsNote}</div>${rule ? `<span class="item-note">${rule}</span>` : ""}</div></div></div>`;
+    const copyButton = source ? `<button class="button button-small button-outline rule-copy" data-action="copy-rule" data-kind="${kind}" data-id="${item.id}" title="把${escapeHtml(childName(source))}的规则抄给${escapeHtml(childName(childId))}" type="button">抄</button>` : "";
+    const rowActions = `${copyButton}<button class="button button-small button-outline" data-action="edit" data-kind="${kind}" data-id="${item.id}" type="button">编辑</button><button class="button button-small button-outline-danger" data-action="delete" data-kind="${kind}" data-id="${item.id}" type="button">删除</button>`;
+    return `<div class="list-row manage-row" data-kind="${kind}" data-id="${item.id}"><div class="item-info">${handle}<div class="project-visual-wrap">${iconMarkup(item.icon, kind)}</div><div><div class="item-head"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><div class="row-actions">${rowActions}</div></div><div class="item-meta">${chip}${ownChip}${pointsNote}</div>${rule ? `<span class="item-note">${rule}</span>` : ""}</div></div></div>`;
   }).join("") : `<div class="empty-state">项目库为空，点击右上角新增系统项目。</div>`;
 }
 
@@ -847,7 +894,7 @@ function resetAnnouncementEditor() {
   if (!form) return;
   appState.announcementEditId = null;
   form.reset();
-  form.querySelector("button[type='submit']").textContent = "发布通告";
+  form.querySelector("button[type='submit']").textContent = "发布";
   document.getElementById("cancel-announcement-edit")?.classList.add("hidden");
 }
 
@@ -859,7 +906,7 @@ function openAnnouncementEdit(id) {
   form.elements.title.value = announcement.title;
   form.elements.content.value = announcement.content;
   form.elements.audience.value = announcement.audience;
-  form.querySelector("button[type='submit']").textContent = "保存通告";
+  form.querySelector("button[type='submit']").textContent = "保存";
   document.getElementById("cancel-announcement-edit")?.classList.remove("hidden");
   toggleAnnouncementEditor(true);
   form.elements.title.focus();
@@ -943,6 +990,7 @@ function renderWeekGrid(container, titleId) {
 }
 
 // Settlement records title only the item and its tally, so the source carries the reason; other records say it in their title.
+const STREAK_UNITS = ["day", "week", "month", "quarter", "year"];
 const RECORD_SOURCE_LABEL = {
   weekly_bonus: "达标奖励",
   weekly_penalty: "未达标",
@@ -950,7 +998,13 @@ const RECORD_SOURCE_LABEL = {
   target_streak: "连续达标",
   target_streak_penalty: "连续未达标",
 };
-["day", "week", "month", "quarter", "year"].forEach((unit) => { RECORD_SOURCE_LABEL[`deduct_${unit}_streak`] = "连续扣分"; });
+STREAK_UNITS.forEach((unit) => { RECORD_SOURCE_LABEL[`deduct_${unit}_streak`] = "连续扣分"; });
+// 连续奖惩没有水位居行，撤销掉的记录会被下一次结算原样补回，所以这几类不给撤销入口。
+const NO_UNDO_SOURCES = new Set([
+  "target_streak",
+  "target_streak_penalty",
+  ...STREAK_UNITS.map((unit) => `deduct_${unit}_streak`),
+]);
 
 function renderRecords() {
   const weekGrid = document.getElementById("records-week-grid");
@@ -960,7 +1014,8 @@ function renderRecords() {
   const records = recordsFor(appState.selectedDate);
   document.getElementById("day-records").innerHTML = records.length ? records.map((record) => {
     const label = RECORD_SOURCE_LABEL[record.source] || "";
-    return `<div class="record-row"><div><strong>${escapeHtml(record.title)}</strong>${label ? `<span class="record-source">${label}</span>` : ""}<span>${escapeHtml(record.time)}</span></div><strong class="record-amount ${record.type}">${entryAmountText(record)}</strong>${appState.data.user.role === "admin" ? `<button class="button button-small button-outline-danger" data-action="undo" data-id="${record.id}" type="button">撤销</button>` : ""}</div>`;
+    const undo = appState.data.user.role === "admin" && !NO_UNDO_SOURCES.has(record.source) ? `<button class="button button-small button-outline-danger" data-action="undo" data-id="${record.id}" type="button">撤销</button>` : "";
+    return `<div class="record-row"><div><strong>${escapeHtml(record.title)}</strong>${label ? `<span class="record-source">${label}</span>` : ""}<span>${escapeHtml(record.time)}</span></div><strong class="record-amount ${record.type}">${entryAmountText(record)}</strong>${undo}</div>`;
   }).join("") : `<div class="empty-state">当日无积分记录</div>`;
   renderHistory();
 }
@@ -1070,6 +1125,14 @@ function renderItemPeriods(data = appState.analytics) {
   document.getElementById("period-foot").innerHTML = other.count
     ? `<tr><th class="period-name" colspan="2">兑换与其他</th><td colspan="${table.periods.length}">${other.count} 笔 ${coinsText}${lostText}</td></tr>`
     : "";
+  const payoutLines = rows.map((item) => item.cells.map((cell, index) => {
+    if (!cell || !cell.detail || !cell.detail.length) return "";
+    const when = periodHeadText(table.unit, table.periods[index].start);
+    return cell.detail.map((entry) => `<div class="payout-line"><small>${when}</small><span>${escapeHtml(entry.title)}</span><em>${RECORD_SOURCE_LABEL[entry.source] || ""}</em><strong class="${entry.amount > 0 ? "up" : "down"}">${signed(entry.amount)}</strong></div>`).join("");
+  }).join("")).join("");
+  const payoutBlock = document.getElementById("period-payouts");
+  payoutBlock.classList.toggle("hidden", !payoutLines);
+  payoutBlock.querySelector(".payout-list").innerHTML = payoutLines;
   document.querySelector("[data-period-note]").textContent = `近 ${table.periods.length} ${UNIT_MULTI_TEXT[table.unit]} · `;
   const empty = !rows.length && !other.count;
   document.getElementById("period-empty").classList.toggle("hidden", !empty);
@@ -1262,8 +1325,9 @@ function targetRows(childId, filter) {
   ["earn", "deduct"].forEach((kind) => {
     if (filter !== "all" && filter !== "goal" && filter !== kind) return;
     const off = excludedIds(childId, kind);
-    libraryItems(kind).forEach((item) => {
-      if (off.has(Number(item.id)) || !item.active) return;
+    libraryItems(kind).forEach((base) => {
+      if (off.has(Number(base.id))) return;
+      const item = effectiveItem(childId, kind, base);
       rows.push({ kind, item, goal: targetTallyText(item, kind) });
     });
   });
@@ -1272,7 +1336,7 @@ function targetRows(childId, filter) {
 }
 
 function targetEmptyText(filter) {
-  return filter === "goal" ? "还没有项目设置目标" : "还没有启用中的项目";
+  return filter === "goal" ? "还没有项目设置目标" : "还没有项目";
 }
 
 function targetSheetModel() {
@@ -1360,10 +1424,22 @@ function updateRuleUI() {
   document.getElementById("points-field-label").textContent = quantity ? "完成分" : "积分";
 }
 
+// Name, points and icon describe the shared project itself, so only the rule can belong to one child.
+function applyRuleScope() {
+  const scope = document.getElementById("score-rule-fields").elements.rule_scope;
+  const own = scope.value === "child";
+  scope.closest(".rule-scope").classList.toggle("hidden", !(appState.data.children || []).length);
+  document.getElementById("editor-name").disabled = own;
+  document.getElementById("editor-points").disabled = own;
+  document.getElementById("editor-icon-field").classList.toggle("hidden", own);
+}
+
 function openEditor(kind, id = null) {
   appState.editorKind = kind;
   appState.editorId = id;
-  const item = id ? findItem(kind, id) : null;
+  const base = id ? libraryItems(kind).find((entry) => Number(entry.id) === Number(id)) : null;
+  const own = id ? ruleOverrideOf(appState.bindingChildId, kind, id) : null;
+  const item = id ? effectiveItem(appState.bindingChildId, kind, base) : null;
   const itemIconKnown = Boolean(item?.icon && (PROJECT_ICONS.some(([file]) => file === item.icon) || BUILTIN_ICON_MAP.has(item.icon)));
   appState.selectedIcon = itemIconKnown ? item.icon : DEFAULT_ITEM_ICONS[kind];
   document.getElementById("editor-kind").textContent = ITEM_KIND_LABEL[kind];
@@ -1373,6 +1449,15 @@ function openEditor(kind, id = null) {
   const rulePanel = document.getElementById("score-rule-fields");
   rulePanel.dataset.kind = kind;
   rulePanel.classList.toggle("hidden", kind === "reward");
+  const scope = rulePanel.elements.rule_scope;
+  scope.value = own ? "child" : "all";
+  scope.disabled = !id || kind === "reward";
+  scope.options[1].textContent = `只给${childName(appState.bindingChildId)}`;
+  const resetButton = rulePanel.querySelector("[data-action='reset-rule']");
+  resetButton.classList.toggle("hidden", !own);
+  resetButton.dataset.kind = kind;
+  resetButton.dataset.id = id || "";
+  applyRuleScope();
   RULE_FIELDS.forEach((field) => { rulePanel.elements[field].value = Number(item?.[field]) || (RULE_DEFAULT_ONE.has(field) ? 1 : 0); });
   RULE_CHECKS.forEach((field) => { rulePanel.elements[field].checked = Boolean(Number(item?.[field] || 0)); });
   Object.entries(RULE_SELECTS).forEach(([field, fallback]) => { rulePanel.elements[field].value = item?.[field] || fallback; });
@@ -1523,6 +1608,17 @@ function excludedIds(childId, kind) {
   return new Set(appState.data.item_bindings?.[String(childId)]?.[kind] || []);
 }
 
+function ruleOverrideOf(childId, kind, itemId) {
+  if (kind === "reward") return null;
+  return appState.data.item_rules?.[String(childId)]?.[kind]?.[String(itemId)] || null;
+}
+
+// A child's own snapshot replaces the library rule everywhere that rule is read, so callers never branch on the source.
+function effectiveItem(childId, kind, item) {
+  const override = ruleOverrideOf(childId, kind, item.id);
+  return override ? { ...item, ...override } : item;
+}
+
 function boundChildCount(kind, itemId) {
   const children = appState.data.children || [];
   return children.filter((child) => !excludedIds(child.id, kind).has(itemId)).length;
@@ -1653,7 +1749,7 @@ async function handleOperation(kind, id, source = null) {
   appState.data = result;
   if (context) context.elements.name.value = "";
   render();
-  showToast(result.request_submitted ? "申请已提交，等待审核" : backdated ? "已补录并重算" : kind === "earn" ? "已加积分" : kind === "exchange" ? "兑换已提交，等待审核" : "已扣积分");
+  showToast(result.request_submitted ? "申请已提交，等待审核" : backdated ? "已补录" : kind === "earn" ? "已加积分" : kind === "exchange" ? "兑换已提交，等待审核" : "已扣积分");
 }
 
 async function saveEditor(event) {
@@ -1661,17 +1757,26 @@ async function saveEditor(event) {
   const form = event.currentTarget;
   const payload = { name: form.elements.name.value.trim(), points: Number(form.elements.points.value), icon: appState.selectedIcon || form.elements.icon.value };
   if (!payload.name || !Number.isInteger(payload.points) || payload.points <= 0) { showToast("请填写项目与积分"); return; }
+  let rule = null;
   if (appState.editorKind !== "reward") {
-    const rule = readRuleForm(form);
+    rule = readRuleForm(form);
     if (!rule) { showToast("规则数值需为 0 或正整数"); return; }
     Object.assign(payload, rule);
   }
+  const childScope = Boolean(rule) && Boolean(appState.editorId) && form.elements.rule_scope.value === "child";
   try {
-    const url = appState.editorId ? `/api/items/${appState.editorKind}/${appState.editorId}` : `/api/items/${appState.editorKind}`;
-    await api(url, { method: appState.editorId ? "PUT" : "POST", body: JSON.stringify(payload) });
+    if (childScope) {
+      await api(`/api/item-rules/${appState.bindingChildId}`, {
+        method: "PUT",
+        body: JSON.stringify({ kind: appState.editorKind, item_id: Number(appState.editorId), ...rule }),
+      });
+    } else {
+      const url = appState.editorId ? `/api/items/${appState.editorKind}/${appState.editorId}` : `/api/items/${appState.editorKind}`;
+      await api(url, { method: appState.editorId ? "PUT" : "POST", body: JSON.stringify(payload) });
+    }
     closeModal();
     await loadState();
-    showToast(appState.editorId ? "项目已更新" : "项目已添加");
+    showToast(childScope ? `已保存${childName(appState.bindingChildId)}的项目规则` : appState.editorId ? "项目已更新" : "项目已添加");
   } catch (error) { showToast(error.message); }
 }
 
@@ -1765,10 +1870,6 @@ async function saveEarnRequest(event) {
 async function deleteItem(kind, id) {
   if (!await requestConfirm("确定删除这个项目吗？", { title: "删除项目", confirmLabel: "删除项目" })) return;
   try { await api(`/api/items/${kind}/${id}`, { method: "DELETE" }); await loadState(); showToast("项目已删除"); } catch (error) { showToast(error.message); }
-}
-
-async function toggleItem(kind, id) {
-  try { appState.data = await api(`/api/items/${kind}/${id}/toggle`, { method: "POST" }); render(); showToast("项目状态已更新"); } catch (error) { showToast(error.message); }
 }
 
 let itemDrag = null;
@@ -1869,9 +1970,10 @@ document.addEventListener("click", async (event) => {
     if (["earn", "deduct", "exchange"].includes(action.dataset.action)) await handleOperation(action.dataset.action, Number(action.dataset.id), action);
     if (action.dataset.action === "edit") openEditor(action.dataset.kind, Number(action.dataset.id));
     if (action.dataset.action === "delete") await deleteItem(action.dataset.kind, Number(action.dataset.id));
-    if (action.dataset.action === "toggle-item") await toggleItem(action.dataset.kind, Number(action.dataset.id));
-    if (action.dataset.action === "select-binding-child") { appState.bindingChildId = Number(action.dataset.child); renderBindingPanel(); }
+    if (action.dataset.action === "select-binding-child") { appState.bindingChildId = Number(action.dataset.child); renderManagement(); }
     if (action.dataset.action === "toggle-binding") await toggleBinding(action.dataset);
+    if (action.dataset.action === "copy-rule") await copyRule(action.dataset.kind, action.dataset.id);
+    if (action.dataset.action === "reset-rule") await resetRule(action.dataset.kind, action.dataset.id);
     if (action.dataset.action === "edit-account") openEditAccount(Number(action.dataset.id));
     if (action.dataset.action === "delete-account") await deleteAccount(Number(action.dataset.id));
     if (action.dataset.action === "approve-request") await reviewRequest("approve", Number(action.dataset.id));
@@ -1977,6 +2079,11 @@ document.getElementById("open-child-register").addEventListener("click", showChi
 document.getElementById("back-to-login").addEventListener("click", showLogin);
 document.getElementById("account-form").elements.role.addEventListener("change", (event) => fillAvatarOptions(event.target.value));
 document.getElementById("score-rule-fields").elements.target_measure.addEventListener("change", updateRuleUI);
+document.getElementById("score-rule-fields").elements.rule_scope.addEventListener("change", applyRuleScope);
+document.querySelectorAll(".rule-sync-source").forEach((select) => select.addEventListener("change", () => {
+  appState.ruleSource[select.closest(".rule-sync").dataset.ruleKind] = Number(select.value);
+  renderManagement();
+}));
 document.querySelectorAll(".entry-context input[name='date']").forEach((input) => input.addEventListener("change", () => { renderEntryContext(); renderItemLists(); }));
 document.getElementById("adventure-level-form")?.elements.mode.addEventListener("change", (event) => {
   const level = document.getElementById("adventure-level-form")?.elements.level;

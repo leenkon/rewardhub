@@ -74,6 +74,7 @@ class PointsManagerApiTests(unittest.TestCase):
             conn.execute("UPDATE app_settings SET value = '100' WHERE key = 'points_per_yuan'")
             conn.execute("DELETE FROM announcements")
             conn.execute("DELETE FROM item_bindings")
+            conn.execute("DELETE FROM item_rule_overrides")
             for table in ("earn_items", "deduct_items", "rewards"):
                 conn.execute(f"DELETE FROM {table}")
 
@@ -348,7 +349,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.create_child(username="child", display_name="小朋友")
         earn_id = self.create_item("earn", "完成作业", 10)
         state = self.state()
-        self.assertEqual(state["version"], "0.8.12")
+        self.assertEqual(state["version"], "0.8.13")
         self.assertEqual(state["user"]["avatar"], "adult-male")
         self.assertEqual(state["active_child"]["avatar"], "boy")
 
@@ -847,6 +848,103 @@ class PointsManagerApiTests(unittest.TestCase):
         self.client.post("/api/auth/select-child", json={"child_id": first["id"]})
         self.assertNotIn(item["id"], [row["id"] for row in self.state()["earn_items"]])
 
+    def test_item_rule_override_only_changes_that_child(self):
+        shared = self.create_child(username="kid-shared")
+        own = self.create_child(username="kid-own")
+        item = self.client.post("/api/items/earn", json={"name": "覆盖项目", "points": 5, "icon": "book.svg"}).get_json()
+
+        response = self.client.put(
+            f"/api/item-rules/{own['id']}",
+            json={"kind": "earn", "item_id": item["id"], "week_target": 1, "week_bonus": 4, "cap_period": "day", "cap_count": 1},
+        )
+        self.assertEqual(response.status_code, 200)
+        rules = response.get_json()["item_rules"]
+        self.assertEqual(rules[str(shared["id"])]["earn"], {})
+        self.assertEqual(rules[str(own["id"])]["earn"][str(item["id"])]["week_target"], 1)
+        self.assertEqual(self.client.put(f"/api/item-rules/{own['id']}", json={"kind": "reward", "item_id": item["id"]}).status_code, 404)
+
+        self.client.post("/api/auth/select-child", json={"child_id": shared["id"]})
+        self.assertEqual(self.earn_item_row(item["id"])["week_target"], 0)
+        self.client.post("/api/auth/select-child", json={"child_id": own["id"]})
+        row = self.earn_item_row(item["id"])
+        self.assertEqual((row["week_target"], row["week_bonus"], row["cap_period"], row["cap_count"]), (1, 4, "day", 1))
+        # The submit cap is read through the same merge, so it limits only the child that carries it.
+        for expected in (201, 400):
+            self.assertEqual(self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"]}).status_code, expected)
+        self.client.post("/api/auth/select-child", json={"child_id": shared["id"]})
+        for _ in range(2):
+            self.assertEqual(self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"]}).status_code, 201)
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
+    def test_item_rule_override_settles_only_for_that_child(self):
+        plain = self.create_child(username="kid-plain")
+        target = self.create_child(username="kid-target")
+        item = self.client.post("/api/items/earn", json={"name": "每孩子的目标", "points": 5, "icon": "book.svg"}).get_json()
+        self.client.put(
+            f"/api/item-rules/{target['id']}",
+            json={"kind": "earn", "item_id": item["id"], "week_target": 2, "week_bonus": 4},
+        )
+        self.backdate_rule(item["id"], self.monday(1), account_id=target["id"])
+        for child in (plain, target):
+            self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+            self.grant(item["id"], weeks_back=1, times=3)
+
+        data = self.settle()
+        self.assertEqual(data["settlement"]["entries"], 1)
+        self.client.post("/api/auth/select-child", json={"child_id": target["id"]})
+        self.assertEqual([row["amount"] for row in self.state()["records"] if row["source"] == "weekly_bonus"], [4])
+        self.client.post("/api/auth/select-child", json={"child_id": plain["id"]})
+        self.assertEqual([row for row in self.state()["records"] if row["source"] == "weekly_bonus"], [])
+        self.assertEqual(len(self.settlement_rows(item["id"])), 1)
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
+    def test_item_rule_copy_takes_the_source_childs_effective_rule(self):
+        source = self.create_child(username="kid-source")
+        target = self.create_child(username="kid-target")
+        item = self.client.post(
+            "/api/items/earn", json={"name": "抄规则项目", "points": 5, "icon": "book.svg", "week_target": 3, "week_bonus": 2}
+        ).get_json()
+        self.client.put(
+            f"/api/item-rules/{source['id']}",
+            json={"kind": "earn", "item_id": item["id"], "week_target": 1, "week_bonus": 9, "cap_period": "day", "cap_count": 1},
+        )
+
+        self.assertEqual(
+            self.client.put(
+                f"/api/item-rules/{source['id']}",
+                json={"action": "copy", "kind": "earn", "item_id": item["id"], "copy_from": source["id"]},
+            ).status_code,
+            400,
+        )
+        response = self.client.put(
+            f"/api/item-rules/{target['id']}",
+            json={"action": "copy", "kind": "earn", "item_id": item["id"], "copy_from": source["id"]},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.client.post("/api/auth/select-child", json={"child_id": target["id"]})
+        row = self.earn_item_row(item["id"])
+        self.assertEqual((row["week_target"], row["week_bonus"], row["cap_period"], row["cap_count"]), (1, 9, "day", 1))
+
+        reset = self.client.delete(f"/api/item-rules/{target['id']}", json={"kind": "earn", "item_id": item["id"]})
+        self.assertEqual(reset.status_code, 200)
+        row = self.earn_item_row(item["id"])
+        self.assertEqual((row["week_target"], row["week_bonus"], row["cap_period"]), (3, 2, ""))
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
+    def test_copying_an_unruled_item_still_anchors_the_snapshot(self):
+        source = self.create_child(username="kid-blank")
+        target = self.create_child(username="kid-copy")
+        item = self.client.post("/api/items/earn", json={"name": "无规则项目", "points": 4, "icon": "book.svg"}).get_json()
+        response = self.client.put(
+            f"/api/item-rules/{target['id']}",
+            json={"action": "copy", "kind": "earn", "item_id": item["id"], "copy_from": source["id"]},
+        )
+        self.assertEqual(response.status_code, 200)
+        snapshot = response.get_json()["item_rules"][str(target["id"])]["earn"][str(item["id"])]
+        self.assertEqual(snapshot["week_target"], 0)
+        self.assertTrue(snapshot["rule_set_at"])
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
     def test_item_bindings_reject_the_whole_batch_when_one_entry_is_bad(self):
         child = self.create_child(username="kid-batch")
         earn = self.client.post("/api/items/earn", json={"name": "批量项目", "points": 3}).get_json()
@@ -886,12 +984,17 @@ class PointsManagerApiTests(unittest.TestCase):
         today = date.today()
         return today - timedelta(days=today.weekday() + weeks_back * 7)
 
-    def backdate_rule(self, item_id, day, kind="earn"):
-        with type(self).connection() as conn:
-            conn.execute(
-                f"UPDATE {kind}_items SET rule_set_at = ? WHERE id = ?",
-                (f"{day.isoformat()}T00:00:00", item_id),
+    def backdate_rule(self, item_id, day, kind="earn", account_id=None):
+        """Anchor a library rule, or one child's snapshot of it, before the window under test."""
+        if account_id is None:
+            sql, tail = f"UPDATE {kind}_items SET rule_set_at = ? WHERE id = ?", (item_id,)
+        else:
+            sql, tail = (
+                "UPDATE item_rule_overrides SET rule_set_at = ? WHERE item_kind = ? AND item_id = ? AND account_id = ?",
+                (kind, item_id, account_id),
             )
+        with type(self).connection() as conn:
+            conn.execute(sql, (f"{day.isoformat()}T00:00:00", *tail))
 
     def settlement_rows(self, item_id, kind="earn"):
         with type(self).connection() as conn:
@@ -899,6 +1002,10 @@ class PointsManagerApiTests(unittest.TestCase):
                 "SELECT week_start, bonus, penalty FROM weekly_settlements WHERE item_kind = ? AND item_id = ? ORDER BY week_start",
                 (kind, item_id),
             ).fetchall()
+
+    def watermarks(self, item_id, kind="earn"):
+        """Graded windows as (week_start, bonus, penalty), so a mark can be compared before and after a write."""
+        return [(row["week_start"], row["bonus"], row["penalty"]) for row in self.settlement_rows(item_id, kind)]
 
     def deduct_on(self, item_id, day, times=1):
         for _ in range(times):
@@ -1017,12 +1124,12 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual([row["penalty"] for row in rows], [3, 3])
         self.client.delete(f"/api/items/earn/{item['id']}")
 
-    def test_settlement_skips_items_disabled_for_the_child(self):
+    def test_settlement_skips_items_unbound_for_the_child(self):
         child = self.create_child()
         self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
         item = self.client.post(
             "/api/items/earn",
-            json={"name": "停用项目", "points": 5, "icon": "book.svg", "week_target": 5, "week_penalty": 3},
+            json={"name": "解绑项目", "points": 5, "icon": "book.svg", "week_target": 5, "week_penalty": 3},
         ).get_json()
         self.grant(item["id"], weeks_back=1)
         self.backdate_rule(item["id"], self.monday(1))
@@ -1031,7 +1138,7 @@ class PointsManagerApiTests(unittest.TestCase):
             json={"bindings": [{"kind": "earn", "item_id": item["id"], "enabled": False}]},
         )
 
-        # A project turned off for this child earns nothing and costs nothing, even with logs behind it.
+        # A project unbound from this child earns nothing and costs nothing, even with logs behind it.
         self.settle()
         self.assertEqual(self.settlement_rows(item["id"]), [])
         self.assertEqual([row for row in self.state()["records"] if row["source"] == "weekly_penalty"], [])
@@ -1085,11 +1192,11 @@ class PointsManagerApiTests(unittest.TestCase):
             [5],
         )
 
-        # The approved log joins that closed window, so its reward is recomputed rather than left behind.
+        # The window is already graded, so the approved log joins its tally without moving the payout.
         self.assertEqual(self.client.post(f"/api/requests/{request_id}/approve", json={}).status_code, 200)
         self.assertEqual(
             [row["amount"] for row in self.settle()["records"] if row["source"] == "weekly_bonus"],
-            [10],
+            [5],
         )
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -1312,17 +1419,17 @@ class PointsManagerApiTests(unittest.TestCase):
             [(False, False), (True, True), (True, False)],
         )
 
-        # The older window then joins in: its own overshoot pays, and the streak is not handed out twice.
+        # A run on an older window pays nothing: settlement walks forward from its newest mark, never back.
         settled = self.settle("week", self.monday(2).isoformat())
         self.assertEqual(
             [(row["title"], row["amount"]) for row in settled["records"] if row["source"] == "weekly_bonus"],
-            [("分期项目 2/1", 5), ("分期项目 2/1", 5)],
+            [("分期项目 2/1", 5)],
         )
         self.assertEqual(len([row for row in settled["records"] if row["source"] == "target_streak"]), 1)
-        self.assertEqual(self.settle_flags()[self.monday(2).isoformat()], (True, True))
+        self.assertEqual(self.settle_flags()[self.monday(2).isoformat()], (True, False))
         self.assertEqual(
             [row["week_start"] for row in self.settlement_rows(item["id"])],
-            [self.monday(2).isoformat(), self.monday(1).isoformat()],
+            [self.monday(1).isoformat()],
         )
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -1363,7 +1470,14 @@ class PointsManagerApiTests(unittest.TestCase):
     def test_settlement_controls_validate_unit_and_period(self):
         app = self.app_module
         periods = self.client.get("/api/settlements/periods?unit=week").get_json()["periods"]
-        self.assertEqual(len(periods), app.STREAK_LOOKBACK_PERIODS["week"] + 1)
+        self.assertEqual(len(periods), app.SETTLE_LOOKBACK_PERIODS["week"] + 1)
+        # The oldest entry sits exactly on the settlement floor, so the picker can never offer a window nothing grades.
+        for unit in ("week", "month", "quarter", "year"):
+            listed = self.client.get(f"/api/settlements/periods?unit={unit}").get_json()["periods"]
+            floor = app.item_window_floor(
+                {"target_unit": unit, "target_every": 1, "rule_set_at": None}, date.today().isoformat()
+            )
+            self.assertEqual(listed[-1]["start"], floor)
         self.assertEqual([row["start"] for row in periods[:3]], [self.monday(weeks).isoformat() for weeks in (0, 1, 2)])
         self.assertFalse(periods[0]["closed"])
         self.assertTrue(all(row["closed"] for row in periods[1:]))
@@ -1427,6 +1541,69 @@ class PointsManagerApiTests(unittest.TestCase):
         )
         self.client.delete(f"/api/items/earn/{weekly['id']}")
         self.client.delete(f"/api/items/earn/{monthly['id']}")
+
+    def test_a_new_item_grades_no_windows_from_before_it_existed(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        item = self.client.post(
+            "/api/items/earn",
+            json={"name": "新建项目", "points": 5, "icon": "book.svg", "week_target": 2, "week_penalty": 3},
+        ).get_json()
+        self.assertIsNotNone(item["rule_set_at"])
+        self.grant(item["id"], weeks_back=1, times=2)
+
+        # The rule starts today, so last week's back-dated logs are history without a rule, not a missed target.
+        self.assertEqual(self.settle("week", period=self.monday(1).isoformat())["settlement"]["entries"], 0)
+        self.assertEqual(self.settlement_rows(item["id"]), [])
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
+    def test_a_rule_set_mid_window_skips_its_own_incomplete_window(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        item = self.client.post(
+            "/api/items/earn",
+            json={"name": "周中设立", "points": 5, "icon": "book.svg", "week_target": 2, "week_bonus": 3, "week_penalty": 3},
+        ).get_json()
+        self.grant(item["id"], weeks_back=2, times=1)
+        self.grant(item["id"], weeks_back=1, times=3)
+        self.backdate_rule(item["id"], self.monday(2) + timedelta(days=2))
+
+        # The rule joined a week already under way, so that week is neither rewarded nor fined; the next full one is graded.
+        self.settle("all")
+        self.assertEqual(
+            [(row["week_start"], row["bonus"], row["penalty"]) for row in self.settlement_rows(item["id"])],
+            [(self.monday(1).isoformat(), 3, 0)],
+        )
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
+    def test_deleting_an_item_voids_only_its_unsettled_windows(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        kept = self.client.post(
+            "/api/items/earn", json={"name": "保留项目", "points": 5, "icon": "book.svg", "week_target": 2, "week_bonus": 3}
+        ).get_json()
+        gone = self.client.post(
+            "/api/items/earn", json={"name": "删除项目", "points": 5, "icon": "book.svg", "week_target": 2, "week_bonus": 3}
+        ).get_json()
+        self.backdate_rule(kept["id"], self.monday(2))
+        self.backdate_rule(gone["id"], self.monday(2))
+        self.grant(kept["id"], weeks_back=1, times=3)
+        self.grant(gone["id"], weeks_back=1, times=3)
+        self.client.delete(f"/api/items/earn/{gone['id']}")
+
+        # The surviving project still settles, and the deleted one keeps the coins its own logs already paid.
+        self.assertEqual(self.settle("week", period=self.monday(1).isoformat())["settlement"]["entries"], 1)
+        self.assertEqual(
+            [(row["week_start"], row["bonus"]) for row in self.settlement_rows(kept["id"])],
+            [(self.monday(1).isoformat(), 3)],
+        )
+        self.assertEqual(self.settlement_rows(gone["id"]), [])
+        with type(self).connection() as conn:
+            logs = conn.execute(
+                "SELECT COUNT(*) FROM records WHERE item_kind = 'earn' AND item_id = ?", (gone["id"],)
+            ).fetchone()[0]
+        self.assertEqual(logs, 3)
+        self.client.delete(f"/api/items/earn/{kept['id']}")
 
     def test_target_streak_pays_after_weeks_on_target(self):
         child = self.create_child()
@@ -1625,9 +1802,17 @@ class PointsManagerApiTests(unittest.TestCase):
         )
         self.assertEqual(settled["total_points"], -9)
 
-        # Grading a closed window does not lock it: a later entry inside it recomputes the charge.
+        # A graded window stays frozen: a later entry inside it does not recompute the charge.
         self.deduct_on(item["id"], self.monday(1) + timedelta(days=3))
         settled = self.settle()
+        charges = [row for row in settled["records"] if row["source"] == "over_cap_penalty"]
+        self.assertEqual(
+            [(row["title"], row["amount"]) for row in charges],
+            [("看电视 3/2", -3)],
+        )
+        self.assertEqual(settled["total_points"], -11)
+        # 重新核算 is the only path that rewrites it, and then the charge follows the new tally.
+        settled = self.settle("week", self.monday(1).isoformat(), force=True)
         charges = [row for row in settled["records"] if row["source"] == "over_cap_penalty"]
         self.assertEqual(
             [(row["title"], row["amount"]) for row in charges],
@@ -1635,6 +1820,74 @@ class PointsManagerApiTests(unittest.TestCase):
         )
         self.assertEqual(settled["total_points"], -14)
         self.client.delete(f"/api/items/deduct/{item['id']}")
+
+    def test_streak_payouts_refuse_individual_undo(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        earn = self.client.post(
+            "/api/items/earn",
+            json={
+                "name": "每日连续",
+                "points": 2,
+                "icon": "book.svg",
+                "target_unit": "day",
+                "week_target": 1,
+                "streak_weeks": 2,
+                "streak_bonus": 4,
+            },
+        ).get_json()
+        self.backdate_rule(earn["id"], date.today() - timedelta(days=4))
+        for days_back in (3, 2, 1):
+            self.assertEqual(self.submit_earn(earn["id"], date=(date.today() - timedelta(days=days_back)).isoformat()).status_code, 201)
+
+        # Day rules settle with the page load, so a deleted streak record would be re-paid inside the same undo request.
+        payouts = self.streak_records("target_streak")
+        self.assertEqual([row["amount"] for row in payouts], [4])
+        refused = self.client.post(f"/api/transactions/{payouts[0]['id']}/undo")
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.get_json()["error"], "连续奖惩记录不能单独撤销，请用首页的重新核算调整")
+        self.assertEqual([row["id"] for row in self.streak_records("target_streak")], [row["id"] for row in payouts])
+
+        deduct = self.client.post(
+            "/api/items/deduct",
+            json={
+                "name": "天天迟到",
+                "points": 1,
+                "icon": "warning.svg",
+                "streak_weeks": 2,
+                "streak_bonus": 3,
+                "streak_unit": "day",
+            },
+        ).get_json()
+        self.backdate_rule(deduct["id"], date.today() - timedelta(days=4), kind="deduct")
+        for days_back in (3, 2, 1):
+            self.deduct_on(deduct["id"], date.today() - timedelta(days=days_back))
+        charges = self.streak_records("deduct_day_streak")
+        self.assertEqual([row["amount"] for row in charges], [-3])
+        self.assertEqual(self.client.post(f"/api/transactions/{charges[0]['id']}/undo").status_code, 409)
+        self.assertEqual(len(self.streak_records("deduct_day_streak")), 1)
+
+        self.client.delete(f"/api/items/earn/{earn['id']}")
+        self.client.delete(f"/api/items/deduct/{deduct['id']}")
+
+    def test_windowed_settlement_can_still_be_undone(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        item = self.client.post(
+            "/api/items/earn",
+            json={"name": "阅读", "points": 5, "icon": "book.svg", "week_target": 2, "week_bonus": 4},
+        ).get_json()
+        self.backdate_rule(item["id"], self.monday(1))
+        self.grant(item["id"], weeks_back=1, times=3)
+        bonuses = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
+        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("阅读 3/2", 4)])
+
+        # The window's audit row survives, so the revoked payout is not re-paid by the next walk.
+        self.assertEqual(self.client.post(f"/api/transactions/{bonuses[0]['id']}/undo").status_code, 200)
+        self.assertEqual(len(self.settlement_rows(item["id"])), 1)
+        settled = self.settle("all")
+        self.assertEqual([row for row in settled["records"] if row["source"] == "weekly_bonus"], [])
+        self.client.delete(f"/api/items/earn/{item['id']}")
 
     def test_earn_streak_award_and_fine_coexist(self):
         child = self.create_child()
@@ -1712,40 +1965,44 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(tuple(row), (2, 0, 2, 5))
         self.client.delete(f"/api/items/earn/{item_id}")
 
-    def test_weekly_rule_validation_and_deactivation(self):
+    def test_upgrade_drops_the_item_switch_columns(self):
+        item_id = self.client.post(
+            "/api/items/earn", json={"name": "重新出现", "points": 3, "icon": "book.svg"}
+        ).get_json()["id"]
+        with type(self).connection() as conn:
+            # An install from when items had an on/off switch stored it per item; dropping the column brings hidden items back.
+            conn.execute("ALTER TABLE earn_items ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            conn.execute("ALTER TABLE earn_items ADD COLUMN active_from TEXT")
+            conn.execute("UPDATE earn_items SET active = 0 WHERE id = ?", (item_id,))
+            self.app_module.ensure_item_schema(conn)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(earn_items)").fetchall()}
+        self.assertNotIn("active", columns)
+        self.assertNotIn("active_from", columns)
+        self.assertIn(item_id, [row["id"] for row in self.state()["item_library"]["earn"]])
+        self.client.delete(f"/api/items/earn/{item_id}")
+
+    def test_weekly_rule_validation(self):
         child = self.create_child()
         self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
         item = self.client.post(
-            "/api/items/earn", json={"name": "停用项目", "points": 8, "icon": "book.svg"}
+            "/api/items/earn", json={"name": "验证项目", "points": 8, "icon": "book.svg"}
         ).get_json()
-        self.assertTrue(item["active"])
 
         response = self.client.put(
             f"/api/items/earn/{item['id']}",
-            json={"name": "停用项目", "points": 8, "icon": "book.svg", "week_target": 3, "week_bonus": 2},
+            json={"name": "验证项目", "points": 8, "icon": "book.svg", "week_target": 3, "week_bonus": 2},
         )
         self.assertEqual(response.get_json()["week_target"], 3)
         response = self.client.put(
             f"/api/items/earn/{item['id']}",
-            json={"name": "停用项目", "points": 8, "icon": "book.svg", "week_target": 3, "streak_bonus": 5},
+            json={"name": "验证项目", "points": 8, "icon": "book.svg", "week_target": 3, "streak_bonus": 5},
         )
         self.assertEqual(response.status_code, 400)
         response = self.client.put(
             f"/api/items/earn/{item['id']}",
-            json={"name": "停用项目", "points": 8, "icon": "book.svg", "week_target": -1},
+            json={"name": "验证项目", "points": 8, "icon": "book.svg", "week_target": -1},
         )
         self.assertEqual(response.status_code, 400)
-
-        response = self.client.post(f"/api/items/earn/{item['id']}/toggle")
-        library = next(row for row in response.get_json()["item_library"]["earn"] if row["id"] == item["id"])
-        self.assertFalse(library["active"])
-        self.assertNotIn(item["id"], [row["id"] for row in self.state()["earn_items"]])
-        response = self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"]})
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("已停用", response.get_json()["error"])
-
-        self.client.post(f"/api/items/earn/{item['id']}/toggle")
-        self.assertEqual(self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"]}).status_code, 201)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
     def test_count_days_once_tallies_distinct_days(self):
@@ -1818,6 +2075,12 @@ class PointsManagerApiTests(unittest.TestCase):
         earned = next(row for row in periods["items"]["earn"] if row["name"] == "计算题")
         self.assertEqual((earned["measure"], earned["total"]["count"], earned["total"]["quantity"]), ("quantity", 2, 27))
         self.assertEqual((earned["total"]["coins"], earned["total"]["payout"]), (0, 9))
+        # The 奖惩分 column is a sum: its detail lines are the settlements behind it.
+        cell = next(cell for cell in earned["cells"] if cell and cell["detail"])
+        self.assertEqual(
+            [(row["title"], row["source"], row["amount"]) for row in cell["detail"]],
+            [("计算题 27/10", "weekly_bonus", 9)],
+        )
         self.assertEqual([row["name"] for row in periods["items"]["deduct"] if row["name"] == "计算题"], [])
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -1957,7 +2220,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(settled["total_points"], 3)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
-    def test_manual_backdating_resettles_closed_windows(self):
+    def test_manual_backdating_leaves_closed_windows_settled(self):
         self.client.post("/api/auth/select-child", json={"child_id": self.create_child()["id"]})
         item = self.client.post(
             "/api/items/earn",
@@ -1971,33 +2234,37 @@ class PointsManagerApiTests(unittest.TestCase):
             [("阅读 1/2", -3)],
         )
         self.assertEqual(settled["total_points"], 2)
+        graded = self.watermarks(item["id"])
+        self.assertEqual(graded, [(self.monday(1).isoformat(), 0, 3)])
 
-        # A back-dated 补录 reopens its window: the water mark and its fine clear, and the new tally simply meets the target.
+        # A back-dated 补录 joins a window that is already graded: its score lands, the fine stays where it was paid.
         added = self.manual_entry(
             item_kind="earn", item_id=item["id"], date=(self.monday(1) + timedelta(days=3)).isoformat()
         )
         self.assertEqual(added.status_code, 201)
-        self.assertEqual(self.settlement_rows(item["id"]), [])
         settled = self.settle()
-        self.assertEqual([row for row in settled["records"] if row["source"].startswith("weekly")], [])
-        self.assertEqual(settled["total_points"], 10)
-
-        # One more log tips the window over the target, so the overshoot pays instead.
-        added = self.manual_entry(
-            item_kind="earn", item_id=item["id"], date=(self.monday(1) + timedelta(days=4)).isoformat()
+        self.assertEqual(
+            [(row["title"], row["amount"]) for row in settled["records"] if row["source"].startswith("weekly")],
+            [("阅读 1/2", -3)],
         )
-        self.assertEqual(added.status_code, 201)
-        settled = self.settle()
-        bonuses = [row for row in settled["records"] if row["source"] == "weekly_bonus"]
-        self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("阅读 3/2", 4)])
-        self.assertEqual(settled["total_points"], 19)
+        self.assertEqual(self.watermarks(item["id"]), graded)
+        self.assertEqual(settled["total_points"], 7)
 
-        # Undoing that 补录 rolls the window back: the overshoot payout goes with it.
+        # Undoing that 补录 takes the score back without rewriting the window either.
         undone = self.client.post(f"/api/transactions/{added.get_json()['record_id']}/undo")
         self.assertEqual(undone.status_code, 200)
-        self.assertEqual(self.settlement_rows(item["id"]), [])
-        settled = self.settle()
+        self.assertEqual([row["penalty"] for row in self.settlement_rows(item["id"])], [3])
+
+        # 重新核算 is the only path that reopens a graded window: the new tally meets target, so the fine clears.
+        self.assertEqual(
+            self.manual_entry(
+                item_kind="earn", item_id=item["id"], date=(self.monday(1) + timedelta(days=4)).isoformat()
+            ).status_code,
+            201,
+        )
+        settled = self.settle("week", self.monday(1).isoformat(), force=True)
         self.assertEqual([row for row in settled["records"] if row["source"].startswith("weekly")], [])
+        self.assertEqual(self.settlement_rows(item["id"]), [])
         self.assertEqual(settled["total_points"], 10)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
@@ -2180,11 +2447,16 @@ class PointsManagerApiTests(unittest.TestCase):
                 "streak_unit": "month",
             },
         ).get_json()
-        self.backdate_rule(item["id"], self.monday(6), "deduct")
-        log_day = self.monday(6) + timedelta(days=1)
+        # The rule starts on the first of a full month about 7 weeks back, so both its own month and one whole week are closed.
+        month_start = self.app_module.period_shift(
+            "month", 1, self.app_module.period_start("month", self.monday(6).isoformat()), -1
+        )
+        week_start = self.app_module.full_window_start("week", 1, month_start)
+        self.backdate_rule(item["id"], date.fromisoformat(month_start), "deduct")
+        log_day = date.fromisoformat(week_start) + timedelta(days=1)
         self.deduct_on(item["id"], log_day, times=3)
-        self.settle("week", self.monday(6).isoformat())
-        self.settle("month", log_day.replace(day=1).isoformat())
+        self.settle("week", week_start)
+        self.settle("month", month_start)
         settled = self.streak_records("over_cap_penalty")
         self.assertEqual([row["amount"] for row in settled], [-4])
         self.assertEqual([row["amount"] for row in self.streak_records("deduct_month_streak")], [-3])
