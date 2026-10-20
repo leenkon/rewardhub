@@ -52,7 +52,7 @@ def generated_secret_key() -> str:
 # Compose forwards "${SECRET_KEY:-}", so an unset value arrives as an empty string rather than missing.
 SECRET_KEY = os.getenv("SECRET_KEY") or generated_secret_key()
 PASSWORD_ITERATIONS = 240_000
-APP_VERSION = "0.8.10"
+APP_VERSION = "0.8.11"
 AVATAR_OPTIONS = {"boy", "girl", "adult-male", "adult-female"}
 CHILD_AVATARS = {"boy", "girl"}
 PROJECT_ICONS = {
