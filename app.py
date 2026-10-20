@@ -107,7 +107,6 @@ def valid_project_icon(icon: str | None) -> bool:
     return icon.startswith("emoji:") and icon[6:] in BUILTIN_ICON_KEYS
 
 ITEM_TABLES = {"earn": "earn_items", "deduct": "deduct_items", "reward": "rewards"}
-# The two scoring kinds carry the target and streak columns; rewards carry none of them.
 SCORING_TABLES = ("earn_items", "deduct_items")
 CAP_PERIOD_LABELS = {
     "day": "每天",
@@ -132,11 +131,9 @@ TARGET_STREAK_SOURCE = "target_streak"
 TARGET_STREAK_PENALTY_SOURCE = "target_streak_penalty"
 ANALYTICS_MAX_DAYS = 365
 RECENT_WINDOW_DAYS = 7
-# Project-by-window table on the analytics page: the default granularity and the widest column count it may ask for.
 ITEM_PERIOD_UNIT = "week"
 ITEM_PERIOD_COUNT = 8
 ITEM_PERIOD_MAX = 31
-# Target sheet workbook: printable units and the caps one export request may carry.
 TARGET_SHEET_UNITS = ("week", "month", "quarter")
 TARGET_SHEET_MAX_CHILDREN = 12
 TARGET_SHEET_MAX_ROWS = 60
@@ -144,7 +141,6 @@ TARGET_SHEET_MAX_COLUMNS = 64
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 WEEK_SETTLE_LOOKBACK = 12
 DAY_SETTLE_LOOKBACK = 60
-# Consecutive-period rules look back a bounded number of windows, whatever the unit picks.
 STREAK_LOOKBACK_PERIODS = {
     "day": DAY_SETTLE_LOOKBACK,
     "week": WEEK_SETTLE_LOOKBACK,
@@ -152,7 +148,6 @@ STREAK_LOOKBACK_PERIODS = {
     "quarter": 4,
     "year": 2,
 }
-# Target windows and deduct streaks choose from the same units; only day settles on its own.
 RULE_UNITS = ("day", "week", "month", "quarter", "year")
 RULE_UNIT_SHORT_TEXT = {"day": "天", "week": "周", "month": "月", "quarter": "季", "year": "年"}
 AUTO_SETTLE_UNITS = ("day",)
@@ -824,7 +819,6 @@ def ensure_settlement_uniqueness(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX records_settlement_once "
         f"ON records(account_id, item_kind, item_id, date, source) WHERE {SETTLEMENT_SOURCE_PREDICATE}"
     )
-    # The stored predicate must equal add_settlement_record's conflict target, or every settlement write raises OperationalError.
     stored = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'records_settlement_once'"
     ).fetchone()
@@ -957,7 +951,6 @@ def item_rule_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any] | No
         "count_days_once": 0 if target.get("target_measure") == "quantity" else rule_flag(payload.get("count_days_once")),
     }
     if kind == "earn":
-        # Only earn items cap how often one submission may be made.
         cap_period = str(payload.get("cap_period") or "").strip().lower()
         if cap_period and cap_period not in CAP_PERIOD_LABELS:
             raise ValueError("提交上限周期只能选每天、每周、每月、每季度、每半年或每年")

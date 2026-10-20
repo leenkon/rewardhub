@@ -672,7 +672,6 @@ function renderManageList(elementId, items, kind) {
     const active = item.active !== false;
     const chip = !active ? `<span class="bind-chip bind-chip-off">已停用</span>` : childTotal ? `<span class="bind-chip${bound === childTotal ? "" : " bind-chip-partial"}">已绑定 ${bound}/${childTotal}</span>` : `<span class="bind-chip bind-chip-partial">暂无孩子账号</span>`;
     const rule = kind === "reward" ? "" : ruleSummary(item, kind);
-    // A quantity item's points arrive at window close, so the card shows them inside the rule summary instead of as an award.
     const pointsNote = isQuantityItem(item, kind) ? "" : `<span class="item-points ${isExpense ? "expense" : "income"}">${isExpense ? "-" : "+"}${pointsText(Math.abs(Number(item.points)))}</span>`;
     const handle = `<button class="drag-handle" type="button" aria-label="拖动排序">⠿</button>`;
     const toggleText = active ? "停用" : "启用";
@@ -1358,7 +1357,6 @@ function updateRuleUI() {
   const panel = document.getElementById("score-rule-fields");
   const quantity = appState.editorKind === "earn" && panel.elements.target_measure.value === "quantity";
   panel.dataset.measure = quantity ? "quantity" : "count";
-  // A quantity item's points are the completion score paid when the window closes, not a per-grant award.
   document.getElementById("points-field-label").textContent = quantity ? "完成分" : "积分";
 }
 
@@ -1416,12 +1414,10 @@ function entryContext(kind) {
   return document.querySelector(`.entry-context[data-entry-kind="${kind}"]`);
 }
 
-// Lists without an entry form (child requests) always log today.
 function entryDate(kind) {
   return entryContext(kind)?.elements.date.value || localDate();
 }
 
-// The date picked above the list decides whether a click logs today's entry or back-dates a 补录.
 function entryBackdated(kind) {
   return entryDate(kind) !== localDate();
 }
