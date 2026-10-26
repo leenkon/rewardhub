@@ -52,7 +52,7 @@ def generated_secret_key() -> str:
 # Compose forwards "${SECRET_KEY:-}", so an unset value arrives as an empty string rather than missing.
 SECRET_KEY = os.getenv("SECRET_KEY") or generated_secret_key()
 PASSWORD_ITERATIONS = 240_000
-APP_VERSION = "0.8.13"
+APP_VERSION = "0.8.14"
 AVATAR_OPTIONS = {"boy", "girl", "adult-male", "adult-female"}
 CHILD_AVATARS = {"boy", "girl"}
 PROJECT_ICONS = {
@@ -1705,15 +1705,16 @@ def resettle_item_windows(
     item_id: Any,
     since_date: str,
     unit: str | None = None,
-) -> None:
-    """Rewind one unit so the next walk regrades it: only 重新核算 touches graded windows, unit keeps it to one family."""
+) -> tuple[str, ...]:
+    """Rewind one item's families from the given date, returning the units whose tails were cleared."""
     if kind not in ("earn", "deduct") or not item_id:
-        return
+        return ()
     row = conn.execute(f"SELECT * FROM {ITEM_TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
     if row is None:
-        return
+        return ()
     item = effective_item(conn, kind, row, account_id)
     item_id = int(item["id"])
+    cleared: list[str] = []
     for family_unit, every, sources, floor, audited in settlement_families(item, kind, current_date()):
         if unit and family_unit != unit:
             continue
@@ -1732,6 +1733,18 @@ def resettle_item_windows(
             """,
             (account_id, kind, item_id, start, *sources),
         )
+        cleared.append(family_unit)
+    return tuple(cleared)
+
+
+def regrade_after_log(
+    conn: sqlite3.Connection, account_id: int, kind: Any, item_id: Any, log_date: str
+) -> None:
+    """Clear this item's windows from the log date on, then re-grade them so the caller's own response is up to date."""
+    units = resettle_item_windows(conn, account_id, kind, item_id, log_date)
+    if units:
+        settle_target_rules(conn, [account_id], units, log_date, int(item_id))
+        settle_streaks(conn, [account_id], units, log_date, int(item_id))
 
 
 def regrade_windows(conn: sqlite3.Connection, account_ids: list[int], unit: str, since: str) -> None:
@@ -1864,11 +1877,17 @@ def settle_earn_streak(
             )
 
 
+def settles_item(item: dict[str, Any], only_item_id: int | None) -> bool:
+    """Whether a walk covers this item; a log's re-grade names only its own item, so other projects stay untouched."""
+    return only_item_id is None or int(item["id"]) == only_item_id
+
+
 def settle_target_rules(
     conn: sqlite3.Connection,
     account_ids: list[int],
     units: tuple[str, ...] = RULE_UNITS,
     only_from: str = "",
+    only_item_id: int | None = None,
 ) -> None:
     """Lazy settlement of target window rules for both scoring directions, per child and only for their bound items."""
     if not account_ids:
@@ -1881,7 +1900,7 @@ def settle_target_rules(
         plans = []
         for kind, item in rule_items(conn, account_id):
             unit, every = item_target(item)
-            if unit not in units:
+            if unit not in units or not settles_item(item, only_item_id):
                 continue
             plans.append(
                 (
@@ -1909,7 +1928,7 @@ def settle_target_rules(
             first = max(floor, period_start(unit, min(per_date), every))
             windows = list(period_range(unit, first, current, every))
             # The chain still counts from the whole lookback, but money only lands after the item's newest mark,
-            # so graded windows stay frozen and a back-dated log cannot rewrite them.
+            # so the routine walk never re-pays a graded window; a log's own re-grade clears those marks first.
             write_from = max(
                 from_start,
                 settled_floor(conn, account_id, kind, item_id, unit, every, TARGET_WINDOW_SOURCES[kind], True),
@@ -1938,7 +1957,11 @@ def streak_rule_items(conn: sqlite3.Connection, account_id: int | None = None) -
 
 
 def settle_streaks(
-    conn: sqlite3.Connection, account_ids: list[int], units: tuple[str, ...] = RULE_UNITS, only_from: str = ""
+    conn: sqlite3.Connection,
+    account_ids: list[int],
+    units: tuple[str, ...] = RULE_UNITS,
+    only_from: str = "",
+    only_item_id: int | None = None,
 ) -> None:
     """Deduct items pay an extra deduction for every N straight periods they were scored."""
     if not account_ids:
@@ -1947,7 +1970,11 @@ def settle_streaks(
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     for raw_account_id in account_ids:
         account_id = int(raw_account_id)
-        items = [item for item in streak_rule_items(conn, account_id) if item["streak_unit"] in units]
+        items = [
+            item
+            for item in streak_rule_items(conn, account_id)
+            if item["streak_unit"] in units and settles_item(item, only_item_id)
+        ]
         if not items:
             continue
         starts = {int(item["id"]): streak_start(item["streak_unit"], today, item["rule_set_at"]) for item in items}
@@ -2134,7 +2161,7 @@ def flow_groups(conn: sqlite3.Connection, account_ids: list[int], start_date: st
 
 
 def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: str, period_count: int) -> dict[str, Any]:
-    """One row per earn/deduct item across the last N windows: how often it was logged, with the coins split into work and settlement."""
+    """One row per child and earn/deduct item across the last N windows: how often it was logged, with the coins split into work and settlement."""
     current = period_start(unit, current_date())
     periods = []
     start = period_shift(unit, 1, current, 1 - period_count)
@@ -2149,31 +2176,38 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
     marks = ",".join("?" * len(account_ids))
     where = f"account_id IN ({marks}) AND date >= ? AND date <= ?"
     params: list[Any] = [*account_ids, periods[0]["start"], periods[-1]["end"]]
-    # The table is one row per item across the whole scope, so only a single-child scope can follow that child's measure.
-    scope_id = int(account_ids[0]) if len(account_ids) == 1 else None
-    overrides = rule_overrides(conn, scope_id) if scope_id is not None else {}
-    library: dict[str, dict[int, dict[str, Any]]] = {}
+    items_of: dict[str, list[dict[str, Any]]] = {}
     for kind in ("earn", "deduct"):
         # Only earn items carry a quantity measure; deduct items always count occurrences.
         measure = "target_measure" if kind == "earn" else "NULL AS target_measure"
-        rows = conn.execute(f"SELECT id, name, {measure} FROM {ITEM_TABLES[kind]}").fetchall()
-        library[kind] = {
-            int(row["id"]): apply_rule_override(dict(row), overrides.get((kind, int(row["id"]))))
-            for row in rows
-        }
-    entries: dict[tuple[str, int], dict[str, Any]] = {}
+        items_of[kind] = [
+            dict(row) for row in conn.execute(f"SELECT id, name, {measure} FROM {ITEM_TABLES[kind]}").fetchall()
+        ]
+    library: dict[tuple[int, str], dict[int, dict[str, Any]]] = {}
+    for raw_scope_id in account_ids:
+        scope_id = int(raw_scope_id)
+        overrides = rule_overrides(conn, scope_id)
+        for kind, rows in items_of.items():
+            library[(scope_id, kind)] = {
+                int(row["id"]): apply_rule_override(dict(row), overrides.get((kind, int(row["id"]))))
+                for row in rows
+            }
+    entries: dict[tuple[str, int, int], dict[str, Any]] = {}
 
     def tally_for(kind: str, row: sqlite3.Row) -> dict[str, int] | None:
         position = window_of.get(period_start(unit, row["date"]))
         if position is None:
             return None
-        key = (kind, int(row["item_id"]))
+        account_id = int(row["account_id"])
+        item_id = int(row["item_id"])
+        key = (kind, account_id, item_id)
         entry = entries.get(key)
         if entry is None:
-            item = library[kind].get(key[1])
+            item = library[(account_id, kind)].get(item_id)
             entry = entries[key] = {
                 "kind": kind,
-                "item_id": key[1],
+                "account_id": account_id,
+                "item_id": item_id,
                 "name": item["name"] if item else str(row["title"]),
                 "measure": "quantity" if item and str(item["target_measure"] or "count") == "quantity" else "count",
                 "cells": [None] * len(periods),
@@ -2185,7 +2219,7 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
 
     for kind in ("earn", "deduct"):
         for row in conn.execute(
-            f"SELECT item_id, title, date, amount, quantity FROM records WHERE {COMPLETION_FILTERS[kind]} AND {where}",
+            f"SELECT account_id, item_id, title, date, amount, quantity FROM records WHERE {COMPLETION_FILTERS[kind]} AND {where}",
             params,
         ).fetchall():
             tally = tally_for(kind, row)
@@ -2197,7 +2231,7 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
     # Settlement rows ride on the same item, so their coins stay a separate column instead of inflating what was earned.
     for row in conn.execute(
         f"""
-        SELECT item_kind, item_id, title, date, amount, source FROM records
+        SELECT account_id, item_kind, item_id, title, date, amount, source FROM records
         WHERE {where} AND item_kind IN ('earn', 'deduct') AND item_id IS NOT NULL AND {SETTLEMENT_SOURCE_PREDICATE}
         """,
         params,
@@ -2222,8 +2256,8 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
 
     def rows_of(kind: str) -> list[dict[str, Any]]:
         found = []
-        for (entry_kind, _item_id), entry in entries.items():
-            if entry_kind != kind:
+        for entry in entries.values():
+            if entry["kind"] != kind:
                 continue
             totals = {key: 0 for key in ("count", "quantity", "coins", "payout")}
             for tally in entry["cells"]:
@@ -2232,7 +2266,15 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
                 for key in totals:
                     totals[key] += tally[key]
             found.append({**entry, "total": totals})
-        found.sort(key=lambda item: (-abs(item["total"]["coins"] + item["total"]["payout"]), -item["total"]["count"], item["name"]))
+        # Children come first, then the money: a parent reads the table one child at a time.
+        found.sort(
+            key=lambda item: (
+                item["account_id"],
+                -abs(item["total"]["coins"] + item["total"]["payout"]),
+                -item["total"]["count"],
+                item["name"],
+            )
+        )
         return found
 
     result["items"] = {"earn": rows_of("earn"), "deduct": rows_of("deduct")}
@@ -3614,6 +3656,8 @@ def create_transaction():
                     quantity,
                 ),
             )
+            # Re-grade before the response below, so its badges and payouts already include this log.
+            regrade_after_log(conn, account_id, item_kind, item_id, transaction_date)
             return jsonify({"record_id": cursor.lastrowid, **state_payload(conn, user)}), 201
     except (TypeError, ValueError) as exc:
         return api_error(str(exc))
@@ -3665,6 +3709,14 @@ def approve_request(request_id: int):
             "UPDATE point_requests SET status = 'approved', reviewed_at = ?, reviewer_id = ? WHERE id = ?",
             (now_iso(), user["id"], request_id),
         )
+        # An approval can land inside an already-closed window, so it re-grades its item like any other log.
+        regrade_after_log(
+            conn,
+            int(point_request["account_id"]),
+            point_request["item_kind"],
+            point_request["item_id"],
+            point_request["date"],
+        )
         return jsonify(state_payload(conn, user))
 
 
@@ -3704,7 +3756,9 @@ def undo_transaction(record_id: int):
         if removed["source"] in STREAK_SOURCES:
             return api_error("连续奖惩记录不能单独撤销，请用首页的重新核算调整", 409)
         conn.execute("DELETE FROM records WHERE id = ? AND account_id = ?", (record_id, account_id))
-        # Both directions stay one-off overrides: graded windows are only ever rewritten by 重新核算.
+        # Only a log regrades: dropping a payout is a one-off override, not a reason to re-settle the window.
+        if removed["source"] not in AUTO_SETTLEMENT_SOURCES:
+            regrade_after_log(conn, account_id, removed["item_kind"], removed["item_id"], removed["date"])
         return jsonify(state_payload(conn, user))
 
 

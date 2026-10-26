@@ -526,7 +526,8 @@ function renderItemList(container, items, kind, mode) {
     const weekNote = weekTarget ? `<span class="week-chip">${targetPeriodText(item, true)} ${Number(item.week_count || 0)}/${weekTarget}</span>` : "";
     const pointsNote = byQuantity ? "" : `<span class="item-points ${kind === "deduct" || isExchange ? "expense" : "income"}">${pointSign}${pointsText(actualPoints)}</span>`;
     const quantityInput = byQuantity ? `<input class="qty-input" type="number" min="1" inputmode="numeric" placeholder="数量" data-qty-for="${item.id}">` : "";
-    return `<div class="list-row"><div class="item-info"><div class="project-visual-wrap">${iconMarkup(item.icon, kind)}</div><div><strong>${escapeHtml(item.name)}</strong>${pointsNote}${benefitNote}${weekNote}</div></div>${quantityInput}<button class="button button-small ${actionClass}" data-action="${kind}" data-id="${item.id}" type="button">${actionText}${badge}</button></div>`;
+    const noteInput = mode === "admin" && !isExchange ? `<input class="note-input" type="text" maxlength="24" placeholder="原因">` : "";
+    return `<div class="list-row"><div class="item-info"><div class="project-visual-wrap">${iconMarkup(item.icon, kind)}</div><div><strong>${escapeHtml(item.name)}</strong>${pointsNote}${benefitNote}${weekNote}</div></div>${quantityInput}${noteInput}<button class="button button-small ${actionClass}" data-action="${kind}" data-id="${item.id}" type="button">${actionText}${badge}</button></div>`;
   }).join("");
 }
 
@@ -1114,21 +1115,22 @@ function renderItemPeriods(data = appState.analytics) {
   if (!table) return;
   const rows = table.items?.[appState.analyticsKind] || [];
   const other = table.other || {};
-  document.getElementById("period-head").innerHTML = `<tr><th>项目</th><th>合计</th>${
+  const childName = (id) => (data.children || []).find((child) => String(child.id) === String(id))?.display_name || "";
+  document.getElementById("period-head").innerHTML = `<tr><th>项目</th><th>孩子</th><th>合计</th>${
     table.periods.map((period) => `<th title="${escapeHtml(period.label)}">${periodHeadText(table.unit, period.start)}</th>`).join("")
   }</tr>`;
-  document.getElementById("period-body").innerHTML = rows.map((item) => `<tr><th class="period-name">${escapeHtml(item.name)}</th>${
+  document.getElementById("period-body").innerHTML = rows.map((item) => `<tr><th class="period-name">${escapeHtml(item.name)}</th><td class="period-who">${escapeHtml(childName(item.account_id))}</td>${
     periodCellMarkup(item.total, item.measure)
   }${item.cells.map((cell) => periodCellMarkup(cell, item.measure)).join("")}</tr>`).join("");
   const coinsText = other.gained ? `<em class="up">+${other.gained}</em>` : "";
   const lostText = other.lost ? `<em class="down">-${other.lost}</em>` : "";
   document.getElementById("period-foot").innerHTML = other.count
-    ? `<tr><th class="period-name" colspan="2">兑换与其他</th><td colspan="${table.periods.length}">${other.count} 笔 ${coinsText}${lostText}</td></tr>`
+    ? `<tr><th class="period-name" colspan="3">兑换与其他</th><td colspan="${table.periods.length}">${other.count} 笔 ${coinsText}${lostText}</td></tr>`
     : "";
   const payoutLines = rows.map((item) => item.cells.map((cell, index) => {
     if (!cell || !cell.detail || !cell.detail.length) return "";
     const when = periodHeadText(table.unit, table.periods[index].start);
-    return cell.detail.map((entry) => `<div class="payout-line"><small>${when}</small><span>${escapeHtml(entry.title)}</span><em>${RECORD_SOURCE_LABEL[entry.source] || ""}</em><strong class="${entry.amount > 0 ? "up" : "down"}">${signed(entry.amount)}</strong></div>`).join("");
+    return cell.detail.map((entry) => `<div class="payout-line"><small>${when}</small><small>${escapeHtml(childName(item.account_id))}</small><span>${escapeHtml(entry.title)}</span><em>${RECORD_SOURCE_LABEL[entry.source] || ""}</em><strong class="${entry.amount > 0 ? "up" : "down"}">${signed(entry.amount)}</strong></div>`).join("");
   }).join("")).join("");
   const payoutBlock = document.getElementById("period-payouts");
   payoutBlock.classList.toggle("hidden", !payoutLines);
@@ -1730,14 +1732,16 @@ async function handleOperation(kind, id, source = null) {
   if (!Number.isInteger(points) || points <= 0) throw new Error("该项目暂不可用");
   // Only the admin lists own the date and note above them; a child's request always logs today.
   const context = kind === "exchange" || appState.data?.user?.role === "child" ? null : entryContext(kind);
-  const note = context ? context.elements.name.value.trim() : "";
-  // A past date above the list turns the click into a 补录: the backend scores it by the item's rules and reopens its windows.
+  const row = source?.closest(".list-row") || null;
+  // The reason typed in the row wins over the note above the list, so a per-item reason never gets lost.
+  const note = row?.querySelector(".note-input")?.value.trim() || (context ? context.elements.name.value.trim() : "");
+  // A past date above the list turns the click into a 补录: the backend scores it by the item's own rules.
   const backdated = Boolean(context) && entryBackdated(kind);
   const payload = backdated
     ? { kind: "manual", item_kind: kind, name: note, item_id: item.id, date: context.elements.date.value }
     : { kind, name: note, points, item_id: item.id };
   if (isQuantityItem(item, kind)) {
-    const quantity = Number(source?.closest(".list-row")?.querySelector(".qty-input")?.value);
+    const quantity = Number(row?.querySelector(".qty-input")?.value);
     if (!Number.isInteger(quantity) || quantity <= 0) throw new Error("请输入数量");
     payload.quantity = quantity;
   }
@@ -1749,7 +1753,7 @@ async function handleOperation(kind, id, source = null) {
   appState.data = result;
   if (context) context.elements.name.value = "";
   render();
-  showToast(result.request_submitted ? "申请已提交，等待审核" : backdated ? "已补录" : kind === "earn" ? "已加积分" : kind === "exchange" ? "兑换已提交，等待审核" : "已扣积分");
+  showToast(result.request_submitted ? "申请已提交，等待审核" : backdated ? "已补录并重算" : kind === "earn" ? "已加积分" : kind === "exchange" ? "兑换已提交，等待审核" : "已扣积分");
 }
 
 async function saveEditor(event) {

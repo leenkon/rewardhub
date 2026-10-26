@@ -195,6 +195,8 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .week-chip { display: inline-block; margin-top: 7px; margin-right: 5px; padding: 4px 8px; border-radius: 999px; font-size: 10px; font-weight: 800; color: var(--blue-dark); background: var(--blue-soft); }
 .count-badge { margin-left: 5px; padding: 1px 5px; border-radius: 999px; background: rgba(255, 255, 255, .26); font-size: 10px; font-weight: 800; }
 .qty-input { flex: 0 0 56px; width: 56px; min-height: 34px; margin: 0; padding: 0 6px; color: var(--ink); font-size: 13px; font-weight: 700; text-align: center; }
+.note-input { flex: 1 1 92px; max-width: 170px; min-height: 34px; margin: 0; padding: 0 8px; color: var(--ink); font-size: 12px; font-weight: 700; }
+.note-input::placeholder { color: #93a89e; }
 .drag-handle { flex: 0 0 auto; width: 22px; min-height: 37px; padding: 0; color: #93a89e; background: none; border: 0; border-radius: 6px; font-size: 15px; cursor: grab; touch-action: none; }
 .drag-handle:hover { color: var(--green-dark); background: var(--green-soft); }
 .list-row.dragging { background: var(--green-soft); border-color: var(--green-line); box-shadow: 0 8px 22px rgba(22, 62, 48, .12); }
@@ -484,6 +486,7 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 /* Both matrices clip their name column instead of widening the table. */
 .period-table .period-name, .target-table .sheet-name { overflow: hidden; color: var(--ink); font-weight: 750; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .period-table .period-name { max-width: 132px; }
+.period-table .period-who { color: var(--muted); font-size: 11px; font-weight: 750; white-space: nowrap; }
 .period-cell { line-height: 1.25; }
 .period-cell span { display: block; color: var(--muted); font-size: 11px; font-weight: 750; }
 .period-cell em { display: block; font-style: normal; font-size: 11px; font-weight: 800; white-space: nowrap; }
