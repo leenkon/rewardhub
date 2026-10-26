@@ -614,8 +614,11 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
   .login-illustration { width: 132px; height: 132px; }
   .no-child-panel { align-items: stretch; flex-direction: column; gap: 15px; }
   .log-heading { align-items: flex-start; flex-direction: row; }
+  /* 带撤销的行多了一个控件，窄屏装不下名字加四个控件：项目名占满第一行，控件整组排到第二行 */
+  .list-row:has(.row-undo) { flex-wrap: wrap; }
+  .list-row:has(.row-undo) .item-info { flex: 1 1 100%; }
   .list-row .button-small { min-width: 72px; padding: 0 10px; }
-  /* 撤销是次要操作：不让它和加/扣分按钮抢同样的 72px，窄屏才保得住项目名那一列 */
+  /* 撤销是次要操作，不让它和加/扣分按钮抢同样的 72px */
   .list-row .row-undo { flex: 0 0 auto; min-width: 0; padding: 0 9px; font-size: 11px; }
   .management-table, .compact-table, .log-table, .account-table { font-size: 12px; }
   .avatar-table { width: 32px; height: 32px; }

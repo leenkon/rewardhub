@@ -515,7 +515,7 @@ function renderItemList(container, items, kind, mode) {
   const actionText = isExchange ? "申请兑换" : mode === "child" ? "申请" : backdated ? "补录" : kind === "earn" ? "加积分" : "扣积分";
   const actionClass = kind === "deduct" ? "button-danger" : isExchange ? "button-dark" : "button-primary";
   const pointSign = kind === "deduct" || isExchange ? "-" : "+";
-  const canUndo = mode === "admin" && !isExchange && appState.data.user.role === "admin";
+  const canUndo = mode === "admin" && appState.data.user.role === "admin";
   container.innerHTML = items.map((item) => {
     const basePoints = Number(item.base_points || Math.abs(Number(item.points)));
     const actualPoints = Math.abs(Number(item.points));
@@ -528,7 +528,7 @@ function renderItemList(container, items, kind, mode) {
     const pointsNote = byQuantity ? "" : `<span class="item-points ${kind === "deduct" || isExchange ? "expense" : "income"}">${pointSign}${pointsText(actualPoints)}</span>`;
     const quantityInput = byQuantity ? `<input class="qty-input" type="number" min="1" inputmode="numeric" placeholder="数量" data-qty-for="${item.id}">` : "";
     const noteInput = mode === "admin" && !isExchange ? `<input class="note-input" type="text" maxlength="24" placeholder="原因">` : "";
-    const undoTarget = canUndo ? undoTargetFor(kind, Number(item.id), tallyDate) : null;
+    const undoTarget = canUndo ? undoTargetFor(kind, item.id, tallyDate) : null;
     const undoButton = undoTarget ? `<button class="button button-small button-outline-danger row-undo" data-action="undo" data-id="${undoTarget.id}" title="撤销${RECORD_SOURCE_LABEL[undoTarget.source] || (kind === "earn" ? "加积分" : "扣积分")}" type="button">撤销</button>` : "";
     return `<div class="list-row"><div class="item-info"><div class="project-visual-wrap">${iconMarkup(item.icon, kind)}</div><div><strong>${escapeHtml(item.name)}</strong>${pointsNote}${benefitNote}${weekNote}</div></div>${quantityInput}${noteInput}${undoButton}<button class="button button-small ${actionClass}" data-action="${kind}" data-id="${item.id}" type="button">${actionText}${badge}</button></div>`;
   }).join("");
@@ -603,7 +603,7 @@ async function copyRule(kind, itemId) {
       method: "PUT",
       body: JSON.stringify({ action: "copy", kind, item_id: Number(itemId), copy_from: source }),
     });
-  // 应答里已经带了完整状态，所以重新渲染一次就够——不用再拉一次。
+    // 应答里已经带了完整状态，所以重新渲染一次就够——不用再拉一次。
     render();
     showToast(`已把${childName(source)}的规则抄给${childName(target)}`);
   } catch (error) { showToast(error.message); }
@@ -1013,10 +1013,8 @@ const NO_UNDO_SOURCES = new Set([
 // 撤销挂在项目行上：优先这一天的加减分记录，其次才是该项目当天落账的达标/未达标发放。
 function undoTargetFor(kind, itemId, date) {
   const rows = (appState.data.records || []).filter((record) => (
-    record.item_kind === kind && Number(record.item_id) === itemId
-    && record.date === date && !NO_UNDO_SOURCES.has(record.source)
+    record.item_kind === kind && Number(record.item_id) === itemId && record.date === date && !NO_UNDO_SOURCES.has(record.source)
   ));
-  if (!rows.length) return null;
   return rows.find((record) => !RECORD_SOURCE_LABEL[record.source]) || rows[0];
 }
 
