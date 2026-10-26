@@ -78,7 +78,7 @@ function localDate(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
-// Every weekly window starts on Monday; getDay() counts Sunday as 0, hence the || 7.
+// 每周窗口都从周一开始；getDay() 把周日算作 0，所以要 || 7。
 function mondayOf(date) {
   const monday = new Date(date);
   monday.setDate(date.getDate() - (date.getDay() || 7) + 1);
@@ -134,7 +134,7 @@ function isQuantityItem(item, kind) {
 }
 
 function entryAmountText(entry) {
-  // Quantity entries carry no points yet; they log how much was done until the window settles.
+  // 数量口径的录入还没有分值，只记录做了多少，直到窗口结算。
   return Number(entry.quantity) > 0 ? `数量 ${entry.quantity}` : `${signed(entry.amount)} 积分`;
 }
 
@@ -185,7 +185,7 @@ function levelBenefitText() {
   return "赚积分 +" + earnBonus + "% · 兑换省 " + exchangeDiscount + "%";
 }
 
-// The cash-exchange panel is child-only, and list rows already carry the server-side bonus, so this is the one preview the client owns.
+// 现金兑换面板只给孩子看，而列表行已经带了服务端算好的奖励，所以这是客户端唯一自己算的预览。
 function discountedExchangePoints(points) {
   const discount = Number(appState.data?.gamification?.exchange_discount_percent || 0);
   return Math.max(1, Math.floor(points * (1 - discount / 100)));
@@ -281,7 +281,7 @@ function updateAccountUi() {
     selector.classList.toggle("hidden", !children.length);
     selector.innerHTML = children.map((child) => `<option value="${child.id}">${escapeHtml(child.display_name)}</option>`).join("");
     selector.value = String(appState.data.active_child_id || "");
-    // The settle bar is static markup, so its period list loads once per unit rather than on every render.
+    // 结算栏是静态结构，所以期次列表每个单位只加载一次，不是每次渲染都拉。
     if (appState.settlePeriodUnit !== document.getElementById("settle-unit").value) loadSettlePeriods();
   } else {
     selector.classList.add("hidden");
@@ -291,14 +291,14 @@ function updateAccountUi() {
 function syncSettleRun() {
   const unit = document.getElementById("settle-unit");
   const option = document.getElementById("settle-period").selectedOptions[0];
-  // settlePeriodUnit is the unit the on-screen list really belongs to, so a reload in flight or a failed one keeps 结算 unreachable.
+  // settlePeriodUnit 是屏幕上这份列表真正归属的单位，所以重载进行中或失败时，结算保持不可点。
   document.getElementById("settle-run").disabled = unit.value !== appState.settlePeriodUnit || option?.dataset.closed !== "1";
 }
 
 async function loadSettlePeriods() {
   const unit = document.getElementById("settle-unit").value;
   const select = document.getElementById("settle-period");
-  // Reloads after a settle run too, so keep the period the admin was looking at.
+  // 结算跑完后也会重载，所以要把管理员正在看的那一期留住。
   const previous = select.value;
   syncSettleRun();
   try {
@@ -324,7 +324,7 @@ function navigate(page) {
   document.querySelectorAll(".page").forEach((element) => element.classList.toggle("active", element.dataset.page === page));
   document.querySelectorAll(".nav-button[data-page-target], .nav-more-item").forEach((element) => element.classList.toggle("active", element.dataset.pageTarget === page));
   setNavMore(false);
-  // The sheet's own buttons decide which pages light up the 更多 entry, so the two stay in sync.
+  // 表头自己的按钮决定「更多」入口在哪几个页面亮起，两边因此始终一致。
   document.getElementById("nav-more").classList.toggle("active", Boolean(document.querySelector(`.nav-more-item[data-page-target="${page}"]`)));
   render();
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -515,6 +515,7 @@ function renderItemList(container, items, kind, mode) {
   const actionText = isExchange ? "申请兑换" : mode === "child" ? "申请" : backdated ? "补录" : kind === "earn" ? "加积分" : "扣积分";
   const actionClass = kind === "deduct" ? "button-danger" : isExchange ? "button-dark" : "button-primary";
   const pointSign = kind === "deduct" || isExchange ? "-" : "+";
+  const canUndo = mode === "admin" && !isExchange && appState.data.user.role === "admin";
   container.innerHTML = items.map((item) => {
     const basePoints = Number(item.base_points || Math.abs(Number(item.points)));
     const actualPoints = Math.abs(Number(item.points));
@@ -527,7 +528,9 @@ function renderItemList(container, items, kind, mode) {
     const pointsNote = byQuantity ? "" : `<span class="item-points ${kind === "deduct" || isExchange ? "expense" : "income"}">${pointSign}${pointsText(actualPoints)}</span>`;
     const quantityInput = byQuantity ? `<input class="qty-input" type="number" min="1" inputmode="numeric" placeholder="数量" data-qty-for="${item.id}">` : "";
     const noteInput = mode === "admin" && !isExchange ? `<input class="note-input" type="text" maxlength="24" placeholder="原因">` : "";
-    return `<div class="list-row"><div class="item-info"><div class="project-visual-wrap">${iconMarkup(item.icon, kind)}</div><div><strong>${escapeHtml(item.name)}</strong>${pointsNote}${benefitNote}${weekNote}</div></div>${quantityInput}${noteInput}<button class="button button-small ${actionClass}" data-action="${kind}" data-id="${item.id}" type="button">${actionText}${badge}</button></div>`;
+    const undoTarget = canUndo ? undoTargetFor(kind, Number(item.id), tallyDate) : null;
+    const undoButton = undoTarget ? `<button class="button button-small button-outline-danger row-undo" data-action="undo" data-id="${undoTarget.id}" title="撤销${RECORD_SOURCE_LABEL[undoTarget.source] || (kind === "earn" ? "加积分" : "扣积分")}" type="button">撤销</button>` : "";
+    return `<div class="list-row"><div class="item-info"><div class="project-visual-wrap">${iconMarkup(item.icon, kind)}</div><div><strong>${escapeHtml(item.name)}</strong>${pointsNote}${benefitNote}${weekNote}</div></div>${quantityInput}${noteInput}${undoButton}<button class="button button-small ${actionClass}" data-action="${kind}" data-id="${item.id}" type="button">${actionText}${badge}</button></div>`;
   }).join("");
 }
 
@@ -590,7 +593,7 @@ function renderBindingPanel() {
   renderRuleSync();
 }
 
-// Rules are the per-child layer, so a copy stores the source child's effective rule for this one item onto the child selected above.
+// 规则是逐孩子的一层，所以「抄」是把源孩子在这个项目上的生效规则，存成上方选中孩子的副本。
 async function copyRule(kind, itemId) {
   const target = Number(appState.bindingChildId);
   const source = Number(appState.ruleSource[kind]);
@@ -600,7 +603,7 @@ async function copyRule(kind, itemId) {
       method: "PUT",
       body: JSON.stringify({ action: "copy", kind, item_id: Number(itemId), copy_from: source }),
     });
-    // The answer already carries the whole state, so a re-render is enough — no second fetch.
+  // 应答里已经带了完整状态，所以重新渲染一次就够——不用再拉一次。
     render();
     showToast(`已把${childName(source)}的规则抄给${childName(target)}`);
   } catch (error) { showToast(error.message); }
@@ -837,7 +840,7 @@ function markAnnouncementSeen(id) {
   try {
     sessionStorage.setItem(`rewardhub-announcement-${id}`, "1");
   } catch (_error) {
-    // Private browsing may disable sessionStorage; the popup still works for this render.
+    // 无痕模式可能禁用 sessionStorage；这一次渲染弹窗照样能用。
   }
 }
 
@@ -990,7 +993,7 @@ function renderWeekGrid(container, titleId) {
   if (title) title.textContent = `本周积分（${signed(total)}）`;
 }
 
-// Settlement records title only the item and its tally, so the source carries the reason; other records say it in their title.
+// 结算记录的标题只有项目和计数，原因交给 source；其余记录在标题里就说明原因。
 const STREAK_UNITS = ["day", "week", "month", "quarter", "year"];
 const RECORD_SOURCE_LABEL = {
   weekly_bonus: "达标奖励",
@@ -1007,6 +1010,16 @@ const NO_UNDO_SOURCES = new Set([
   ...STREAK_UNITS.map((unit) => `deduct_${unit}_streak`),
 ]);
 
+// 撤销挂在项目行上：优先这一天的加减分记录，其次才是该项目当天落账的达标/未达标发放。
+function undoTargetFor(kind, itemId, date) {
+  const rows = (appState.data.records || []).filter((record) => (
+    record.item_kind === kind && Number(record.item_id) === itemId
+    && record.date === date && !NO_UNDO_SOURCES.has(record.source)
+  ));
+  if (!rows.length) return null;
+  return rows.find((record) => !RECORD_SOURCE_LABEL[record.source]) || rows[0];
+}
+
 function renderRecords() {
   const weekGrid = document.getElementById("records-week-grid");
   if (!weekGrid) return;
@@ -1015,8 +1028,7 @@ function renderRecords() {
   const records = recordsFor(appState.selectedDate);
   document.getElementById("day-records").innerHTML = records.length ? records.map((record) => {
     const label = RECORD_SOURCE_LABEL[record.source] || "";
-    const undo = appState.data.user.role === "admin" && !NO_UNDO_SOURCES.has(record.source) ? `<button class="button button-small button-outline-danger" data-action="undo" data-id="${record.id}" type="button">撤销</button>` : "";
-    return `<div class="record-row"><div><strong>${escapeHtml(record.title)}</strong>${label ? `<span class="record-source">${label}</span>` : ""}<span>${escapeHtml(record.time)}</span></div><strong class="record-amount ${record.type}">${entryAmountText(record)}</strong>${undo}</div>`;
+    return `<div class="record-row"><div><strong>${escapeHtml(record.title)}</strong>${label ? `<span class="record-source">${label}</span>` : ""}<span>${escapeHtml(record.time)}</span></div><strong class="record-amount ${record.type}">${entryAmountText(record)}</strong></div>`;
   }).join("") : `<div class="empty-state">当日无积分记录</div>`;
   renderHistory();
 }
@@ -1094,7 +1106,7 @@ const PERIOD_OPTIONS = { day: [7, 14, 31], week: [4, 8, 12], month: [3, 6, 12], 
 
 function periodHeadText(unit, start) {
   if (unit === "month") return `${Number(start.slice(5, 7))}月`;
-  // Eight quarters span two years, so the bare 季号会重复；带上年后两位区分。
+  // 八个季度横跨两年，光写季号会重复；带上年的后两位来区分。
   if (unit === "quarter") return `${start.slice(2, 4)}年${(Number(start.slice(5, 7)) - 1) / 3 + 1}季`;
   if (unit === "year") return `${Number(start.slice(0, 4))}年`;
   return chartLabelShort(start);
@@ -1102,7 +1114,7 @@ function periodHeadText(unit, start) {
 
 function periodCellMarkup(tally, measure) {
   if (!tally) return "<td></td>";
-  // A window can pay out a penalty with no log inside it, so the count text only appears when something was done.
+  // 窗口可能只罚分而里面一条记录都没有，所以只在确实有完成时才显示计数。
   const done = tally.count || tally.quantity ? (measure === "quantity" ? `${tally.quantity}个` : `${tally.count}次`) : "";
   const coins = tally.coins ? `<em class="${tally.coins > 0 ? "up" : "down"}">${signed(tally.coins)}</em>` : "";
   const payout = tally.payout ? `<em class="payout ${tally.payout > 0 ? "up" : "down"}">${signed(tally.payout)}</em>` : "";
@@ -1250,7 +1262,7 @@ function renderAnalytics() {
   renderItemPeriods(data);
 }
 
-// Switching range, unit, scope or page fires overlapping requests; only the newest one may draw the matrix.
+// 换区间、单位、范围或页码会并发多个请求；只有最新那一个能绘制矩阵。
 let analyticsRequestId = 0;
 
 async function loadAnalytics() {
@@ -1333,7 +1345,7 @@ function targetRows(childId, filter) {
       rows.push({ kind, item, goal: targetTallyText(item, kind) });
     });
   });
-  // Items without a rule still belong on a printable sheet, they just leave the 目标 column blank to write in.
+  // 没有规则的项目依然要出现在可打印的表上，只是把「目标」那格留白让人手写。
   return filter === "goal" ? rows.filter((row) => row.goal) : rows;
 }
 
@@ -1385,7 +1397,7 @@ async function exportTargetSheet() {
       const data = await response.json().catch(() => ({}));
       throw new Error(data.error || "导出失败");
     }
-    // The workbook name belongs to the server, so the download keeps the same one the response asks for.
+    // 工作簿的文件名归服务端定，下载就沿用应答里给的那一个。
     const disposition = /filename\*=UTF-8''([^;]+)/.exec(response.headers.get("Content-Disposition") || "");
     const link = document.createElement("a");
     const url = URL.createObjectURL(await response.blob());
@@ -1426,7 +1438,7 @@ function updateRuleUI() {
   document.getElementById("points-field-label").textContent = quantity ? "完成分" : "积分";
 }
 
-// Name, points and icon describe the shared project itself, so only the rule can belong to one child.
+// 名称、分值和图标描述的是共享的项目本身，所以只有规则才可能属于某一个孩子。
 function applyRuleScope() {
   const scope = document.getElementById("score-rule-fields").elements.rule_scope;
   const own = scope.value === "child";
@@ -1615,7 +1627,7 @@ function ruleOverrideOf(childId, kind, itemId) {
   return appState.data.item_rules?.[String(childId)]?.[kind]?.[String(itemId)] || null;
 }
 
-// A child's own snapshot replaces the library rule everywhere that rule is read, so callers never branch on the source.
+// 孩子自己的快照会在所有读取规则的地方顶掉库规则，所以调用方不用判断来源。
 function effectiveItem(childId, kind, item) {
   const override = ruleOverrideOf(childId, kind, item.id);
   return override ? { ...item, ...override } : item;
@@ -1730,12 +1742,12 @@ async function handleOperation(kind, id, source = null) {
   const item = findItem(kind, id);
   const points = Math.abs(Number(item?.points));
   if (!Number.isInteger(points) || points <= 0) throw new Error("该项目暂不可用");
-  // Only the admin lists own the date and note above them; a child's request always logs today.
+  // 只有家长的列表才有上方的日期和备注；孩子的申请一律记今天。
   const context = kind === "exchange" || appState.data?.user?.role === "child" ? null : entryContext(kind);
   const row = source?.closest(".list-row") || null;
-  // The reason typed in the row wins over the note above the list, so a per-item reason never gets lost.
+  // 行里填的原因优先于列表上方的备注，所以每个项目各自的原因不会丢。
   const note = row?.querySelector(".note-input")?.value.trim() || (context ? context.elements.name.value.trim() : "");
-  // A past date above the list turns the click into a 补录: the backend scores it by the item's own rules.
+  // 列表上方选了过去的日期，这一点击就变成补录：后端按项目自己的规则计分。
   const backdated = Boolean(context) && entryBackdated(kind);
   const payload = backdated
     ? { kind: "manual", item_kind: kind, name: note, item_id: item.id, date: context.elements.date.value }
@@ -1861,7 +1873,7 @@ async function handleTaskAction(action, id) {
 }
 
 async function saveEarnRequest(event) {
-  // The listener is delegated on document, so currentTarget is document rather than the form.
+  // 监听器委托在 document 上，所以 currentTarget 是 document 而不是表单。
   const form = event.target;
   const payload = { kind: form.dataset.kind, name: form.elements.name.value.trim(), points: Number(form.elements.points.value) };
   const result = await api("/api/transactions", { method: "POST", body: JSON.stringify(payload) });
@@ -1968,7 +1980,7 @@ document.addEventListener("click", async (event) => {
   if (closeTarget) { closeModal(); return; }
   const action = event.target.closest("[data-action]");
   if (!action || action.disabled) return;
-  // A second click while the first request is still in flight would post the same transaction twice.
+  // 第一次请求还在飞的时候再点一次，会把同一笔交易提交两遍。
   action.disabled = true;
   try {
     if (["earn", "deduct", "exchange"].includes(action.dataset.action)) await handleOperation(action.dataset.action, Number(action.dataset.id), action);

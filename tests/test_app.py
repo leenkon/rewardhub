@@ -349,7 +349,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.create_child(username="child", display_name="小朋友")
         earn_id = self.create_item("earn", "完成作业", 10)
         state = self.state()
-        self.assertEqual(state["version"], "0.8.14")
+        self.assertEqual(state["version"], "0.8.15")
         self.assertEqual(state["user"]["avatar"], "adult-male")
         self.assertEqual(state["active_child"]["avatar"], "boy")
 
@@ -624,8 +624,10 @@ class PointsManagerApiTests(unittest.TestCase):
         reward_id = self.create_item("reward", "买零食", 20)
         self.assertEqual(self.client.post("/api/transactions", json={"kind": "exchange", "reward_id": reward_id}).status_code, 409)
 
-        record_id = self.state()["records"][0]["id"]
-        response = self.client.post(f"/api/transactions/{record_id}/undo")
+        newest = self.state()["records"][0]
+        # 行内的撤销要把记录认回项目行，所以载荷必须带上项目标识
+        self.assertEqual((newest["item_kind"], newest["item_id"]), ("deduct", deduct_id))
+        response = self.client.post(f"/api/transactions/{newest['id']}/undo")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["total_points"], 10)
 

@@ -483,7 +483,7 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .period-table th, .period-table td { padding: 6px 8px; }
 .period-table td { text-align: center; }
 .period-table td:first-child, .period-table th:first-child { text-align: left; }
-/* Both matrices clip their name column instead of widening the table. */
+/* 两张矩阵表都裁掉项目名列，而不是把表格撑宽。 */
 .period-table .period-name, .target-table .sheet-name { overflow: hidden; color: var(--ink); font-weight: 750; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .period-table .period-name { max-width: 132px; }
 .period-table .period-who { color: var(--muted); font-size: 11px; font-weight: 750; white-space: nowrap; }
@@ -493,7 +493,7 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .period-cell em.up { color: var(--green-dark); }
 .period-cell em.down { color: var(--red-dark); }
 .period-cell em.payout { margin-top: 2px; padding-top: 2px; border-top: 1px dashed var(--line); }
-/* Wide ranges scroll sideways, so the project column has to ride on top of them. */
+/* 大区间会横向滚动，所以项目列必须浮在它们上面。 */
 .period-table thead th:first-child, .period-table .period-name { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line); }
 .period-table thead th:first-child { z-index: 2; background: var(--tint); }
 .period-table tbody tr:hover .period-name { background: var(--tint); }
@@ -526,11 +526,11 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 
 .analytics-controls { position: sticky; top: 66px; z-index: 8; display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin: 0 0 18px; padding: 8px 11px; background: rgba(255, 255, 255, .94); border: 1px solid var(--line); border-radius: var(--radius-sm); backdrop-filter: blur(10px); }
 .analytics-controls label { flex: 0 1 160px; color: var(--muted); font-size: 11px; font-weight: 750; }
-/* The date input would otherwise stay inline and sit on the caption's baseline, so its label drifts above the selects'. */
+/* 日期输入框若仍按 inline 排，就会贴住说明文字的基线，标签因此飘到下拉框上方。 */
 .analytics-controls select, .analytics-controls input { display: block; min-width: 132px; margin-top: 5px; }
 .scope-note { margin-left: 7px; color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .scope-note:empty { display: none; }
-/* Chart.js canvases carry an intrinsic 300px width that blows out narrow grid tracks. */
+/* Chart.js 的 canvas 自带 300px 固有宽度，会把窄的网格列撑爆。 */
 .chart-panel { min-width: 0; }
 .chart-panel .section-heading { align-items: flex-start; }
 .chart-frame { position: relative; height: var(--chart-h); }
@@ -565,7 +565,7 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
   .hero-identity, .hero-balance, .hero-actions { grid-column: 1 / -1; }
   .hero-balance { padding: 16px 0 0; border-top: 1px solid rgba(255,255,255,.22); border-left: 0; }
   .management-table { min-width: 760px; }
-  /* The period matrix carries .management-table too, so this has to come after it to win. */
+  /* 期次矩阵也带了 .management-table，所以这条要排在它后面才能生效。 */
   .period-table { min-width: 0; }
   .no-child-panel { align-items: flex-start; flex-direction: column; }
   .control-center-stats { grid-column: 1 / -1; grid-template-columns: repeat(3, 1fr); }
@@ -615,6 +615,8 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
   .no-child-panel { align-items: stretch; flex-direction: column; gap: 15px; }
   .log-heading { align-items: flex-start; flex-direction: row; }
   .list-row .button-small { min-width: 72px; padding: 0 10px; }
+  /* 撤销是次要操作：不让它和加/扣分按钮抢同样的 72px，窄屏才保得住项目名那一列 */
+  .list-row .row-undo { flex: 0 0 auto; min-width: 0; padding: 0 9px; font-size: 11px; }
   .management-table, .compact-table, .log-table, .account-table { font-size: 12px; }
   .avatar-table { width: 32px; height: 32px; }
   .quick-form { grid-template-columns: 1fr 110px; }

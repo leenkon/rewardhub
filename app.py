@@ -33,7 +33,7 @@ DATABASE_PATH = Path(os.getenv("DATABASE_PATH") or DATA_DIR / "points.db")
 
 
 def generated_secret_key() -> str:
-    """A source-published key would let anyone forge an admin cookie, so a missing one is created once and kept beside the data."""
+    """密钥一旦写进源码，任何人都能伪造管理员 cookie，所以缺失时只在首次启动生成一份，和数据放在一起。"""
     key_file = DATA_DIR / "secret_key"
     try:
         stored = key_file.read_text(encoding="utf-8").strip() if key_file.is_file() else ""
@@ -45,14 +45,14 @@ def generated_secret_key() -> str:
         key_file.chmod(0o600)
         return fresh
     except OSError:
-        # A read-only data directory must not block boot; such an install simply re-issues logins each start.
+        # 数据目录只读不该挡住启动：这种安装只是每次启动重新发一次登录态。
         return secrets.token_hex(32)
 
 
-# Compose forwards "${SECRET_KEY:-}", so an unset value arrives as an empty string rather than missing.
+# Compose 转发的是 "${SECRET_KEY:-}"，所以未设置时传来的是空串，而不是根本没有这个变量。
 SECRET_KEY = os.getenv("SECRET_KEY") or generated_secret_key()
 PASSWORD_ITERATIONS = 240_000
-APP_VERSION = "0.8.14"
+APP_VERSION = "0.8.15"
 AVATAR_OPTIONS = {"boy", "girl", "adult-male", "adult-female"}
 CHILD_AVATARS = {"boy", "girl"}
 PROJECT_ICONS = {
@@ -125,9 +125,9 @@ DEDUCT_STREAK_SOURCES = {
     "quarter": "deduct_quarter_streak",
     "year": "deduct_year_streak",
 }
-# Earn streaks are graded against the item's own target windows, so one source covers every window unit.
+# 加分连续链按项目自己的目标窗口判定，所以一个 source 就覆盖所有窗口单位。
 TARGET_STREAK_SOURCE = "target_streak"
-# The double-payout guard keys on source, so the unmet-streak fine cannot share target_streak.
+# 防重复发放是按 source 认的，所以「连续未达标扣」不能共用 target_streak。
 TARGET_STREAK_PENALTY_SOURCE = "target_streak_penalty"
 ANALYTICS_MAX_DAYS = 365
 RECENT_WINDOW_DAYS = 7
@@ -139,7 +139,7 @@ TARGET_SHEET_MAX_CHILDREN = 12
 TARGET_SHEET_MAX_ROWS = 60
 TARGET_SHEET_MAX_COLUMNS = 64
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-# One horizon serves every settlement path: the manual picker lists exactly the periods the engine floors can still reach.
+# 所有结算路径共用同一份回看长度：手动结算列出的期次，正好是引擎地板还够得到的那些。
 SETTLE_LOOKBACK_PERIODS = {"day": 84, "week": 12, "month": 12, "quarter": 4, "year": 2}
 RULE_UNITS = ("day", "week", "month", "quarter", "year")
 RULE_UNIT_SHORT_TEXT = {"day": "天", "week": "周", "month": "月", "quarter": "季", "year": "年"}
@@ -147,20 +147,20 @@ AUTO_SETTLE_UNITS = ("day",)
 MANUAL_SETTLE_UNITS = tuple(unit for unit in RULE_UNITS if unit not in AUTO_SETTLE_UNITS)
 SETTLE_UNIT_ALL = "all"
 TARGET_MEASURES = ("count", "quantity")
-# Windows longer than one unit count from this fixed Monday, so every account shares the same boundaries.
+# 比一个单位更长的窗口都从这个固定的周一起算，于是所有账号的窗口边界一致。
 WINDOW_EPOCH = date(2000, 1, 3)
 MONTH_EPOCH_INDEX = WINDOW_EPOCH.year * 12
-# Quantity logs carry no points until the window settles, so they stay in the tally through quantity.
-# An item-linked 补录 is an admin back-dated log, so it joins the tally like the child's own submission.
+# 数量录入在窗口结算前不带分值，所以统计时按 quantity 计入。
+# 带项目的补录是家长代填的过去日期记录，和孩子自己的提交一样计入。
 EARN_COMPLETION_FILTER = (
     "item_kind = 'earn' AND item_id IS NOT NULL AND (amount > 0 OR quantity > 0) AND COALESCE(source, 'earn') IN ('earn', 'manual')"
 )
 DEDUCT_COMPLETION_FILTER = (
     "item_kind = 'deduct' AND item_id IS NOT NULL AND amount < 0 AND COALESCE(source, 'deduct') IN ('deduct', 'manual')"
 )
-# Target windows tally logged work, so the payout/fine sources above stay out of both filters.
+# 目标窗口只统计真实完成的工作，所以上面那些发放/罚分 source 都不进这两个过滤条件。
 COMPLETION_FILTERS = {"earn": EARN_COMPLETION_FILTER, "deduct": DEDUCT_COMPLETION_FILTER}
-# The rule columns a re-anchored settlement chain reads, and the full set one child's snapshot may replace.
+# 结算链重新锚定时要读的规则列，以及单个孩子的快照能够整体替换的全部列。
 RULE_ANCHOR_FIELDS = (
     "week_target",
     "week_bonus",
@@ -177,25 +177,25 @@ RULE_ANCHOR_FIELDS = (
 )
 RULE_OVERRIDE_FIELDS = (*RULE_ANCHOR_FIELDS, "cap_period", "cap_count", "count_days_once", "rule_set_at")
 TARGET_BONUS_SOURCES = {"earn": "weekly_bonus", "deduct": "over_cap_penalty"}
-# Sources each settlement family writes, so a regrade clears its own rows and nobody else's: earn streaks ride on the target windows.
+# 每一族结算会写入的 source：重算只清自己那几行，不误伤别的——加分连续链就挂在目标窗口上。
 TARGET_WINDOW_SOURCES = {
     "earn": (TARGET_BONUS_SOURCES["earn"], "weekly_penalty", TARGET_STREAK_SOURCE, TARGET_STREAK_PENALTY_SOURCE),
     "deduct": (TARGET_BONUS_SOURCES["deduct"],),
 }
-# Undoing one of these records recomputes its window, so the payout only stays revoked while the watermark row does.
+# 撤销这几类记录会重算自己的窗口，所以只有水位行还在，发放才维持被撤销的状态。
 AUTO_SETTLEMENT_SOURCES = (
     *TARGET_WINDOW_SOURCES["earn"],
     *TARGET_WINDOW_SOURCES["deduct"],
     *DEDUCT_STREAK_SOURCES.values(),
 )
-# Streak payouts claim no watermark: the record itself is the only dedupe, so deleting one lets the next walk re-pay it.
-# Day-unit streaks come straight back inside the undo request, which runs lazy settlement before answering.
+# 连续发放不占水位：记录本身就是唯一的去重依据，删掉一条，下一趟遍历就会原样补发。
+# 按天的连续链在撤销请求里当场就回来了——它会先跑一次惰性结算再应答。
 STREAK_SOURCES = (
     TARGET_STREAK_SOURCE,
     TARGET_STREAK_PENALTY_SOURCE,
     *DEDUCT_STREAK_SOURCES.values(),
 )
-# The payout index and the INSERT's conflict target have to spell one identical predicate, or the target stops matching.
+# 发放索引和 INSERT 的冲突目标必须拼出完全相同的谓词，否则冲突目标就不匹配了。
 SETTLEMENT_SOURCE_PREDICATE = "source IN (" + ", ".join(f"'{source}'" for source in AUTO_SETTLEMENT_SOURCES) + ")"
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 CUSTOM_ASSET_KEYS = {
@@ -212,7 +212,7 @@ app.config.update(
     SECRET_KEY=SECRET_KEY,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    # Nothing in this app uploads files, so a body this large is already past any legitimate form.
+    # 这个应用不上传文件，这么大的请求体早就超出任何正常表单的范围了。
     MAX_CONTENT_LENGTH=1024 * 1024,
 )
 
@@ -255,10 +255,10 @@ def password_matches(password: str, encoded: str) -> bool:
 
 
 def environment_value(name: str) -> str:
-    """Read an optional base64 value before the plain environment variable.
+    """先读可选的 base64 值，再回落到普通环境变量。
 
-    FlyNAS stores wizard passwords in an env file. Base64 keeps characters such
-    as `$`, `#`, quotes, and spaces from being reinterpreted by Compose.
+    FlyNAS 把安装向导的密码存在 env 文件里。base64 能让 `$`、`#`、引号、空格
+    这些字符不被 Compose 重新解释。
     """
     encoded = os.getenv(f"{name}_B64", "").strip()
     if encoded:
@@ -280,7 +280,7 @@ def admin_credentials_from_env() -> tuple[str, str] | None:
 
 
 def admin_credentials_fingerprint(credentials: tuple[str, str]) -> str:
-    """Return a non-reversible marker for the last applied install credentials."""
+    """给出最后一次生效的安装凭据的不可逆标记。"""
     username, password = credentials
     payload = f"{username}\0{password}".encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
@@ -322,7 +322,7 @@ def create_admin_account(conn: sqlite3.Connection, username: str, password: str)
 
 
 def apply_install_admin_credentials(conn: sqlite3.Connection, credentials: tuple[str, str]) -> bool:
-    """Apply install-wizard credentials once without deleting application data."""
+    """只应用一次安装向导的凭据，不动应用数据。"""
     username, password = credentials
     requested = conn.execute(
         "SELECT * FROM accounts WHERE username = ? AND active = 1", (username,)
@@ -398,7 +398,7 @@ def migrate_point_requests(conn: sqlite3.Connection) -> None:
 
 
 def migrate_items_to_library(conn: sqlite3.Connection) -> None:
-    """Collapse the per-child item copies of versions before 0.8.0 into one system library."""
+    """把 0.8.0 之前每个孩子在项目库里各自的副本，合并成一份系统库。"""
     if not table_has_column(conn, "earn_items", "account_id"):
         return
     children = {int(row["id"]) for row in conn.execute("SELECT id FROM accounts WHERE role = 'child'").fetchall()}
@@ -463,7 +463,7 @@ def migrate_items_to_library(conn: sqlite3.Connection) -> None:
 
 
 def remove_legacy_default_child(conn: sqlite3.Connection) -> None:
-    """Remove the untouched child created by versions before 0.6.2."""
+    """删掉 0.6.2 之前版本自动创建、且从未被改动过的那个孩子。"""
     child = conn.execute(
         "SELECT id FROM accounts WHERE username = 'child' AND role = 'child' AND display_name = '小朋友'"
     ).fetchone()
@@ -757,7 +757,7 @@ def init_db() -> None:
 
 
 def ensure_item_schema(conn: sqlite3.Connection) -> None:
-    """Runs after the legacy library rebuild, which recreates the item tables without these columns."""
+    """在旧库重建之后运行——那一步重建的项目表没有这些列。"""
     all_tables = tuple(ITEM_TABLES.values())
     for column, clause, tables in (
         ("sort_order", "INTEGER NOT NULL DEFAULT 0", all_tables),
@@ -786,7 +786,7 @@ def ensure_item_schema(conn: sqlite3.Connection) -> None:
         for column in ("active", "active_from"):
             if table_has_column(conn, table, column):
                 conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
-    # A negative streak_bonus used to be the only way to fine a losing streak.
+    # 把 streak_bonus 写成负数，曾经是罚「连续未达标」的唯一办法。
     conn.execute(
         """
         UPDATE earn_items
@@ -802,7 +802,7 @@ def ensure_item_schema(conn: sqlite3.Connection) -> None:
 
 
 def ensure_settlement_kind(conn: sqlite3.Connection) -> None:
-    """Deduct windows share the settlement watermark, so item ids need a kind before they can coexist."""
+    """扣分窗口和加分窗口共用结算水位，所以项目 id 必须先带上一_kind 才能并存。"""
     if table_has_column(conn, "weekly_settlements", "item_kind"):
         return
     conn.execute(
@@ -836,8 +836,8 @@ def ensure_settlement_kind(conn: sqlite3.Connection) -> None:
 
 
 def ensure_settlement_uniqueness(conn: sqlite3.Connection) -> None:
-    """Streak payouts own no watermark table, so their record key has to be the guard against a second write."""
-    # An install that raced before this index existed keeps the first record of each window; NULL keys stay free because the index ignores them.
+    """连续发放没有自己的水位表，所以只能用记录本身的唯一键来挡住第二次写入。"""
+    # 早于这个索引建立的实例，每档只保留第一条记录；NULL 的 key 不受约束，因为索引把它们排除在外。
     keyed = f"{SETTLEMENT_SOURCE_PREDICATE} AND account_id IS NOT NULL AND item_kind IS NOT NULL AND item_id IS NOT NULL"
     conn.execute(
         f"""
@@ -881,7 +881,7 @@ def valid_date(value: Any) -> str:
         raise ValueError("日期格式必须为 YYYY-MM-DD") from exc
 
 
-# SQLite binds integers as 64-bit; anything wider would raise OverflowError inside the query instead of returning a message.
+# SQLite 按 64 位整数绑定；更宽的值不会返回错误提示，而是直接在查询里抛 OverflowError。
 INT_FIELD_LIMIT = 2 ** 63 - 1
 
 
@@ -921,7 +921,7 @@ def unit_choice_text(units: tuple[str, ...]) -> str:
 
 
 def streak_rule_payload(payload: dict[str, Any], kind: str) -> dict[str, Any]:
-    """streak_weeks counts deduct periods in streak_unit, but earn target windows, so days reuse the week-named column."""
+    """streak_weeks 对扣分按 streak_unit 数周期，对加分却数目标窗口，所以按天的规则复用这个「周」命名的列。"""
     bonus = non_negative_int(payload.get("streak_bonus"), "连续扣分分值" if kind == "deduct" else "连续达标分值")
     periods = non_negative_int(payload.get("streak_weeks"), "连续期数")
     if bonus and periods <= 0:
@@ -947,7 +947,7 @@ def streak_rule_payload(payload: dict[str, Any], kind: str) -> dict[str, Any]:
 
 
 def target_rule_payload(payload: dict[str, Any], kind: str) -> dict[str, Any]:
-    """Target window columns; the week-named counters hold whatever window and measure the item picked."""
+    """目标窗口的各列；那些以「周」命名的计数器，装的是项目自选的窗口长度和口径。"""
     unit = str(payload.get("target_unit") or "week").strip().lower()
     if unit not in RULE_UNITS:
         raise ValueError(f"目标周期只能选{unit_choice_text(RULE_UNITS)}")
@@ -959,12 +959,12 @@ def target_rule_payload(payload: dict[str, Any], kind: str) -> dict[str, Any]:
         "bonus_every": positive_int(payload.get("bonus_every") or 1, "奖励间隔"),
     }
     if kind == "deduct":
-        # A deduct target is a ceiling of counted submissions: no quantity tally and no shortfall reward.
+        # 扣分目标是「计数的提交不能超」的上限：不看数量口径，也不给未达标发奖励。
         return rule
     measure = str(payload.get("target_measure") or "count").strip().lower()
     if measure not in TARGET_MEASURES:
         raise ValueError("目标口径只能选次数或数量")
-    # Quantity submissions score nothing on their own; without a target there is nothing to settle against.
+    # 数量口径的提交本身不积分；没有目标就没有可结算的依据。
     if measure == "quantity" and rule["week_target"] <= 0:
         raise ValueError("数量口径需要先设目标")
     rule["target_measure"] = measure
@@ -973,14 +973,14 @@ def target_rule_payload(payload: dict[str, Any], kind: str) -> dict[str, Any]:
 
 
 def item_rule_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Rule columns for one item kind; reward items carry no scoring rule."""
+    """一种项目类型的规则列；兑换品没有计分规则。"""
     if kind == "reward":
         return None
     target = target_rule_payload(payload, kind)
     result = {
         **target,
         **streak_rule_payload(payload, kind),
-        # Quantities add up across the window, so the count-only "one grant per day" tally never applies.
+        # 数量在窗口里是累加的，所以「一天只算一次」这种只数次数的口径用不上。
         "count_days_once": 0 if target.get("target_measure") == "quantity" else rule_flag(payload.get("count_days_once")),
     }
     if kind == "earn":
@@ -1182,19 +1182,19 @@ def row_item(row: sqlite3.Row, kind: str) -> dict[str, Any]:
             }
         )
     else:
-        # Deduct items score on count only and their target is a ceiling, so the shortfall fields stay at their defaults.
+        # 扣分项目只按次数计分，目标又是上限口径，所以未达标奖励那几项保持默认值。
         item.update({"week_penalty": 0, "streak_penalty_weeks": 0, "streak_penalty": 0, "target_measure": "count"})
     return item
 
 
 def rule_overrides(conn: sqlite3.Connection, account_id: int) -> dict[tuple[str, int], dict[str, Any]]:
-    """A child's whole override set in one query; a missing key means the item's own rule applies."""
+    """一次查询取回某个孩子的全部覆盖；没有这个 key 就说明用的是项目自身的规则。"""
     rows = conn.execute("SELECT * FROM item_rule_overrides WHERE account_id = ?", (account_id,)).fetchall()
     return {(str(row["item_kind"]), int(row["item_id"])): dict(row) for row in rows}
 
 
 def apply_rule_override(item: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
-    """Lay a child's rule snapshot over an item row; the only place an override merges into a rule."""
+    """把孩子的规则快照盖在项目行上；覆盖并入规则只有这一处。"""
     if override is not None:
         item.update({field: override[field] for field in RULE_OVERRIDE_FIELDS})
     return item
@@ -1207,7 +1207,7 @@ def effective_item(
     account_id: int | None,
     overrides: dict[tuple[str, int], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Item dict as the engine and the UI consume it, already carrying this child's rules."""
+    """引擎和界面消费的那份项目字典，已经带上这个孩子的规则。"""
     if account_id is None or kind == "reward":
         return row_item(row, kind)
     if overrides is None:
@@ -1235,7 +1235,7 @@ def get_balance(conn: sqlite3.Connection, account_id: int) -> int:
 
 
 def child_account_ids(conn: sqlite3.Connection) -> list[int]:
-    """Every live child, in the order settlement and reporting walk them."""
+    """所有在册的孩子，顺序与结算和统计遍历他们时一致。"""
     rows = conn.execute("SELECT id FROM accounts WHERE role = 'child' AND active = 1 ORDER BY id").fetchall()
     return [int(row["id"]) for row in rows]
 
@@ -1261,10 +1261,10 @@ def item_rows(conn: sqlite3.Connection, kind: str, account_id: int | None = None
 def scored_items(
     conn: sqlite3.Connection, kind: str, account_id: int | None = None
 ) -> list[dict[str, Any]]:
-    """Every item of a scoring kind with this child's rules applied, in id order.
+    """某个计分类型下的全部项目，已套用这个孩子的规则，按 id 排序。
 
-    Bindings are not filtered here: the settle walk drops unbound items itself, so it can still
-    find and regrade the windows an item held before it was unbound.
+    这里不筛绑定：结算遍历自己会跳过未绑定的项目，
+    这样才能找到并重算某个项目解绑之前占过的窗口。
     """
     rows = conn.execute(f"SELECT * FROM {ITEM_TABLES[kind]} ORDER BY id").fetchall()
     overrides = rule_overrides(conn, account_id) if account_id is not None else None
@@ -1272,7 +1272,7 @@ def scored_items(
 
 
 def binding_state(conn: sqlite3.Connection, child_ids: list[int]) -> dict[str, dict[str, list[int]]]:
-    """Excluded item ids per child; a child without an exclusion row is bound to the whole library."""
+    """每个孩子被排除的项目 id；没有排除行的孩子等于绑定整个库。"""
     state = {str(child_id): {kind: [] for kind in ITEM_TABLES} for child_id in child_ids}
     rows = conn.execute("SELECT item_kind, item_id, account_id FROM item_bindings WHERE enabled = 0").fetchall()
     for row in rows:
@@ -1286,7 +1286,7 @@ def binding_state(conn: sqlite3.Connection, child_ids: list[int]) -> dict[str, d
 
 
 def rule_override_state(conn: sqlite3.Connection, child_ids: list[int]) -> dict[str, dict[str, dict[str, Any]]]:
-    """Per child the items that carry their own rule snapshot; a child or item missing here follows the library rule."""
+    """每个孩子自带规则快照的那些项目；孩子或项目不在这里，就跟随库里的规则。"""
     state = {str(child_id): {kind: {} for kind in ("earn", "deduct")} for child_id in child_ids}
     for row in conn.execute("SELECT * FROM item_rule_overrides"):
         bucket = state.get(str(int(row["account_id"])))
@@ -1312,7 +1312,7 @@ def set_item_binding(conn: sqlite3.Connection, kind: str, item_id: int, account_
 
 
 def reorder_items(conn: sqlite3.Connection, kind: str, ids: list[int]) -> None:
-    """Persist a drag-and-drop order; ids absent from the payload keep their relative order at the end."""
+    """保存拖拽后的顺序；请求里没列出的 id 保持相对顺序排在最后。"""
     table = ITEM_TABLES[kind]
     existing = [int(row["id"]) for row in conn.execute(f"SELECT id FROM {table} ORDER BY sort_order, id").fetchall()]
     known = set(existing)
@@ -1332,12 +1332,12 @@ def load_bound_item(
         raise ValueError(f"{label}不存在")
     if item_id in excluded_item_ids(conn, kind, account_id):
         raise ValueError(f"{label}未绑定给当前孩子")
-    # Keep the stored sign in points: callers negate a deduct themselves, unlike the UI serializer.
+    # 存储的分值符号保持不变：调用方自己给扣分取负，这一点和 UI 序列化器不同。
     return apply_rule_override(dict(row), rule_overrides(conn, account_id).get((kind, item_id)))
 
 
 def window_unit(unit: str, every: int = 1) -> tuple[str, int]:
-    """Quarters and years reuse the month anchor, which already starts on January and every 12th January."""
+    """季和年复用「月」锚点——它本来就始于一月，以及每隔 12 个月的一月。"""
     if unit == "quarter":
         return ("month", every * 3)
     if unit == "year":
@@ -1346,7 +1346,7 @@ def window_unit(unit: str, every: int = 1) -> tuple[str, int]:
 
 
 def period_start(unit: str, day: str, every: int = 1) -> str:
-    """Natural-calendar anchors: weeks on Monday, months on the 1st; every>1 counts whole windows from WINDOW_EPOCH."""
+    """自然日历锚点：周从周一开始，月从 1 号开始；every>1 从 WINDOW_EPOCH 起数整段窗口。"""
     unit, every = window_unit(unit, every)
     current = date.fromisoformat(day[:10])
     if unit == "month":
@@ -1360,7 +1360,7 @@ def period_start(unit: str, day: str, every: int = 1) -> str:
 
 
 def period_shift(unit: str, every: int, start: str, steps: int) -> str:
-    """Start of the window steps windows after an aligned window start; months step by index."""
+    """从一个对齐的窗口起点往后推 windows 个窗口的起点；按月则直接按序号推进。"""
     unit, every = window_unit(unit, every)
     day = date.fromisoformat(start[:10])
     if unit == "month":
@@ -1370,12 +1370,12 @@ def period_shift(unit: str, every: int, start: str, steps: int) -> str:
 
 
 def period_end(unit: str, start: str, every: int = 1) -> str:
-    """Last day inside the window, inclusive."""
+    """窗口内最后一天，含当天。"""
     return (date.fromisoformat(period_shift(unit, every, start, 1)) - timedelta(days=1)).isoformat()
 
 
 def period_range(unit: str, start: str, end: str, every: int = 1) -> Iterator[str]:
-    """Window starts from start up to, but not including, end."""
+    """从 start 开始、到 end 之前（不含）的所有窗口起点。"""
     period = start
     while period < end:
         yield period
@@ -1387,7 +1387,7 @@ def target_lookback_steps(unit: str, every: int) -> int:
 
 
 def period_label(unit: str, start: str) -> str:
-    """Names for the manual settle picker; quarters and years ride on the month anchor, so they need their own text."""
+    """手动结算下拉里的期次名称；季和年挂在「月」锚点上，所以需要自己的文案。"""
     day = date.fromisoformat(start)
     if unit == "week":
         return f"{day.month}月{day.day}日那周"
@@ -1401,7 +1401,7 @@ def period_label(unit: str, start: str) -> str:
 
 
 def settled_window_starts(conn: sqlite3.Connection, unit: str) -> set[str]:
-    """Periods this unit already graded. Day rules share the watermark table, so each item's own target unit decides."""
+    """这个单位已经判定过的期次。按天的规则共用水位表，所以由项目自己的目标单位决定。"""
     units: dict[tuple[str, int], set[str]] = {}
     for account_id in child_account_ids(conn):
         for kind, item in rule_items(conn, account_id):
@@ -1414,7 +1414,7 @@ def settled_window_starts(conn: sqlite3.Connection, unit: str) -> set[str]:
 
 
 def settlement_periods(unit: str, today: str, settled: set[str]) -> list[dict[str, Any]]:
-    """The current period plus every older one manual settlement can still reach, newest first."""
+    """当前期次，加上手动结算还够得着的所有更早期次，新的在前。"""
     current = period_start(unit, today)
     periods = []
     for steps in range(SETTLE_LOOKBACK_PERIODS[unit] + 1):
@@ -1435,7 +1435,7 @@ def settlement_periods(unit: str, today: str, settled: set[str]) -> list[dict[st
 def completion_counts(
     conn: sqlite3.Connection, account_id: int, kind: str, since_date: str | None = None
 ) -> dict[int, dict[str, list[int]]]:
-    """Per item and date: [grants, total quantity]. Settlement rows never count."""
+    """按项目和日期给出 [发放次数, 数量合计]。结算记录一律不计入。"""
     clause = "account_id = ? AND " + COMPLETION_FILTERS[kind] + (" AND date >= ?" if since_date else "")
     args: list[Any] = [account_id, since_date] if since_date else [account_id]
     rows = conn.execute(f"SELECT item_id, date, quantity FROM records WHERE {clause}", args).fetchall()
@@ -1453,13 +1453,13 @@ def dates_within(per_date: dict[str, list[int]], start: str, until: str) -> dict
 
 
 def item_target(item: sqlite3.Row | dict[str, Any]) -> tuple[str, int]:
-    """Window unit and length; the week-named columns count whatever unit the item picked."""
+    """窗口的单位和长度；那些以「周」命名的列装的是项目自选单位下的数值。"""
     unit = item["target_unit"] or "week"
     return unit, max(int(item["target_every"] or 1), 1)
 
 
 def completion_count(item: sqlite3.Row | dict[str, Any], per_date: dict[str, list[int]]) -> int:
-    """Window tally in the item's own measure: total quantity, distinct days, or grants."""
+    """按项目自己的口径统计窗口：数量合计、不同天数，还是发放次数。"""
     if not per_date:
         return 0
     if is_quantity(item):
@@ -1479,7 +1479,7 @@ def window_count(item: sqlite3.Row | dict[str, Any], per_date: dict[str, list[in
 
 
 def deduct_completion_dates(conn: sqlite3.Connection, account_id: int, since_date: str) -> dict[int, set[str]]:
-    """Dates each deduct item was scored by the child, so streaks only need presence per period."""
+    """每个孩子给每个扣分项目打分的日期，所以连续链只需要知道每一期有没有出现。"""
     rows = conn.execute(
         f"SELECT item_id, date FROM records WHERE account_id = ? AND {DEDUCT_COMPLETION_FILTER} AND date >= ?",
         (account_id, since_date),
@@ -1491,7 +1491,7 @@ def deduct_completion_dates(conn: sqlite3.Connection, account_id: int, since_dat
 
 
 def cap_window(period: str, day: str) -> tuple[str, str]:
-    """Calendar windows start on the 1st of their month; the week window is Monday-based."""
+    """日历窗口都从所在月份的 1 号起算；周窗口以周一为界。"""
     if period == "day":
         return day, day
     if period == "week":
@@ -1512,7 +1512,7 @@ def ensure_submit_cap(
     day: str,
     exclude_request_id: int | None = None,
 ) -> None:
-    """Caps submissions per window for capped items; pending requests already spend a slot."""
+    """对设了上限的项目限制每个窗口的提交次数；待审请求已经占掉一个名额。"""
     if item_id is None:
         return
     row = conn.execute("SELECT * FROM earn_items WHERE id = ?", (item_id,)).fetchone()
@@ -1559,14 +1559,14 @@ def attach_target_stats(
         per_date = counts.get(item["id"], {})
         start, until = windows[item["id"]]
         measure = 1 if is_quantity(item) else 0
-        # The badge counts the date picked above the list, and 补录 can name any past day, so keep every day's tally.
+        # 角标统计的是列表上方选定的日期，而补录可以指定任意过去某天，所以每天都留一份计数。
         item["day_counts"] = {day: tally[measure] for day, tally in per_date.items()}
         item["week_count"] = completion_count(item, dates_within(per_date, start, until))
 
 
 def target_rule_active(item: dict[str, Any], kind: str) -> bool:
-    """Whether this child's effective rule pays or fines at window close: earn targets score overshoot, shortfall,
-    quantity and streaks; a deduct target is a ceiling that only fines the overshoot."""
+    """这个孩子的生效规则在窗口结束时发奖还是罚分：加分目标看超额、未达标、数量和连续；
+    扣分目标是上限，只罚超额部分。"""
     if int(item["week_target"] or 0) <= 0:
         return False
     if kind == "deduct":
@@ -1581,7 +1581,7 @@ def target_rule_active(item: dict[str, Any], kind: str) -> bool:
 
 
 def rule_items(conn: sqlite3.Connection, account_id: int | None = None) -> list[tuple[str, dict[str, Any]]]:
-    """Items whose effective target window pays at close for this child; without a child, the library's own rules."""
+    """某个孩子名下、生效的目标窗口结束时会被结算的项目；不指定孩子时，就是库自己的规则筛出来的项目。"""
     return [
         (kind, item)
         for kind in ("earn", "deduct")
@@ -1591,12 +1591,12 @@ def rule_items(conn: sqlite3.Connection, account_id: int | None = None) -> list[
 
 
 def target_bonus(item: dict[str, Any], tally: int) -> tuple[str, int] | None:
-    """Quantity items pay their points once the target is reached plus bonus per full bonus_every above it; count items pay only the overshoot."""
+    """数量口径的项目达标后先付一次分值，超出目标每满 bonus_every 再加一份奖励；次数口径只付超额部分。"""
     every = max(int(item["bonus_every"] or 1), 1)
     bonus = int(item["week_bonus"] or 0)
     target = int(item["week_target"])
     over = tally - target
-    # Which rule paid is carried by the record's source, so titles only name the item and its tally against the target.
+    # 具体是哪条规则发的钱由记录的 source 承担，标题只写项目和它相对目标的计数。
     title = f"{item['name']} {tally}/{target}"
     if is_quantity(item):
         payout = int(item["points"]) + (over // every) * bonus if over >= 0 else 0
@@ -1637,13 +1637,13 @@ def add_settlement_record(
 
 
 def full_window_start(unit: str, every: int, anchor: str) -> str:
-    """First window the item lived through from day one: a rule set mid-window starts counting the next window."""
+    """项目从第一天起就完整经历的第一个窗口：规则定在半途，就从下一个窗口开始计数。"""
     start = period_start(unit, anchor, every)
     return period_shift(unit, every, start, 1) if anchor > start else start
 
 
 def item_window_floor(item: sqlite3.Row | dict[str, Any], today: str) -> str:
-    """Earliest window lazy settlement may grade: the bounded lookback, never before the item's own rule."""
+    """惰性结算能判定的最早窗口：受回看长度约束，且绝不早于项目自己的规则。"""
     unit, every = item_target(item)
     current = period_start(unit, today, every)
     floor = period_shift(unit, every, current, -target_lookback_steps(unit, every))
@@ -1661,7 +1661,7 @@ def settled_floor(
     sources: tuple[str, ...],
     audited: bool,
 ) -> str:
-    """First window this item may still be paid in: settlement walks forward from its newest mark, never back."""
+    """这个项目还能被发钱的第一个窗口：结算只从它最新的标记往前推，不倒回去。"""
     marks: list[str] = []
     row = conn.execute(
         f"""
@@ -1688,7 +1688,7 @@ def settled_floor(
 
 
 def settlement_families(item: dict[str, Any], kind: str, today: str) -> list[tuple[str, int, tuple[str, ...], str, bool]]:
-    """Windows this item settles: (unit, every, sources, earliest regrade, owns an audit row)."""
+    """这个项目会结算的窗口族：(单位, 长度, source, 最早可重算, 是否拥有水位行)。"""
     unit, every = item_target(item)
     families = [(unit, every, TARGET_WINDOW_SOURCES[kind], item_window_floor(item, today), True)]
     if kind == "deduct" and int(item["streak_weeks"] or 0) and int(item["streak_bonus"] or 0):
@@ -1706,7 +1706,7 @@ def resettle_item_windows(
     since_date: str,
     unit: str | None = None,
 ) -> tuple[str, ...]:
-    """Rewind one item's families from the given date, returning the units whose tails were cleared."""
+    """把某个项目的这些族从给定日期起回退，返回尾部被清掉的那些单位。"""
     if kind not in ("earn", "deduct") or not item_id:
         return ()
     row = conn.execute(f"SELECT * FROM {ITEM_TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
@@ -1718,7 +1718,7 @@ def resettle_item_windows(
     for family_unit, every, sources, floor, audited in settlement_families(item, kind, current_date()):
         if unit and family_unit != unit:
             continue
-        # Each family anchors in its own unit: clearing another family's tail would delete rows nothing regrades.
+        # 每一族按自己的单位定位：清了别族的尾巴，只会删掉一批永远不会重算的行。
         start = max(period_start(family_unit, since_date, every), floor)
         if audited:
             conn.execute(
@@ -1740,7 +1740,7 @@ def resettle_item_windows(
 def regrade_after_log(
     conn: sqlite3.Connection, account_id: int, kind: Any, item_id: Any, log_date: str
 ) -> None:
-    """Clear this item's windows from the log date on, then re-grade them so the caller's own response is up to date."""
+    """从这条记录的日期起清掉该项目的所有窗口并重算，让调用方自己的应答就是最新的。"""
     units = resettle_item_windows(conn, account_id, kind, item_id, log_date)
     if units:
         settle_target_rules(conn, [account_id], units, log_date, int(item_id))
@@ -1748,10 +1748,10 @@ def regrade_after_log(
 
 
 def regrade_windows(conn: sqlite3.Connection, account_ids: list[int], unit: str, since: str) -> None:
-    """Undo what one unit already paid from the chosen period onward, so the settle walk recomputes the whole chain."""
+    """从选定那一期起撤销某个单位已经发放的部分，让结算遍历把整条链重算一遍。"""
     for raw_account_id in account_ids:
         account_id = int(raw_account_id)
-        # Each child regrades the items their own rules settle in this unit, override rows included.
+        # 每个孩子只重算他自己的规则在这个单位下会结算的项目，覆盖行一起算。
         item_ids: dict[str, list[int]] = {"earn": [], "deduct": []}
         for kind, item in rule_items(conn, account_id):
             if item_target(item)[0] == unit:
@@ -1774,8 +1774,8 @@ def settle_target_window(
     start: str,
     timestamp: str,
 ) -> None:
-    """Settles one closed target window; week_start keeps the window's first day."""
-    # A deduct overshoot is a charge: it leaves as a negative record and lands on the penalty side of the audit row.
+    """结算一个已经闭合的目标窗口；week_start 保存窗口的第一天。"""
+    # 扣分超额是一笔账单：它以负分记录落账，并落在审计行的罚分一侧。
     charge = kind == "deduct"
     item_id = int(item["id"])
     unit, every = item_target(item)
@@ -1786,7 +1786,7 @@ def settle_target_window(
     if not bonus and not shortfall:
         return
     payout = bonus[1] if bonus else 0
-    # The unique window row is claimed before any money moves, so two settle walks racing on one window pay once.
+    # 钱还没动之前先抢下这行唯一的窗口记录，所以两趟结算撞同一窗口也只发一次。
     claimed = conn.execute(
         """
         INSERT INTO weekly_settlements(
@@ -1844,14 +1844,14 @@ def settle_earn_streak(
     timestamp: str,
     only_from: str = "",
 ) -> None:
-    """The award chain pays each full run of windows on target; the fine chain pays each run missed."""
+    """奖励链按连续达标的整段发放，每满一段发一次；罚分链按连续未达标发放，每漏一段扣一次。"""
     chains = (
         (int(item["streak_weeks"] or 0), int(item["streak_bonus"] or 0), TARGET_STREAK_SOURCE),
         (int(item["streak_penalty_weeks"] or 0), -int(item["streak_penalty"] or 0), TARGET_STREAK_PENALTY_SOURCE),
     )
     item_id = int(item["id"])
     unit, every = item_target(item)
-    # The run has to count from the whole chain even when only the tail gets paid, so the filter lands on the write.
+    # 就算只发尾巴那一段，段数也要按整条链来数，所以这个过滤条件要落在写入上。
     only_from = period_start(unit, only_from, every) if only_from else ""
     quota = int(item["week_target"])
     for target, amount, source in chains:
@@ -1878,7 +1878,7 @@ def settle_earn_streak(
 
 
 def settles_item(item: dict[str, Any], only_item_id: int | None) -> bool:
-    """Whether a walk covers this item; a log's re-grade names only its own item, so other projects stay untouched."""
+    """这一趟遍历是否覆盖这个项目：某条记录的重算只点名自己那个项目，别的项目不受影响。"""
     return only_item_id is None or int(item["id"]) == only_item_id
 
 
@@ -1889,14 +1889,14 @@ def settle_target_rules(
     only_from: str = "",
     only_item_id: int | None = None,
 ) -> None:
-    """Lazy settlement of target window rules for both scoring directions, per child and only for their bound items."""
+    """两个计分方向的目标窗口惰性结算：逐孩子进行，且只算他们绑定的项目。"""
     if not account_ids:
         return
     today = current_date()
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     for raw_account_id in account_ids:
         account_id = int(raw_account_id)
-        # Rules are read per child, so an item can settle in another window for one child only.
+        # 规则逐孩子读取，所以同一个项目可以只为某一个孩子在某个窗口结算。
         plans = []
         for kind, item in rule_items(conn, account_id):
             unit, every = item_target(item)
@@ -1922,13 +1922,13 @@ def settle_target_rules(
         for kind, item, unit, every, current, floor, from_start in plans:
             item_id = int(item["id"])
             per_date = counts[kind].get(item_id) or {}
-            # A project the child never logged has nothing to reward and nothing to fine.
+            # 孩子从没记录过的项目，既没有可奖励的也没有可罚的。
             if not per_date or item_id in blocked[kind]:
                 continue
             first = max(floor, period_start(unit, min(per_date), every))
             windows = list(period_range(unit, first, current, every))
-            # The chain still counts from the whole lookback, but money only lands after the item's newest mark,
-            # so the routine walk never re-pays a graded window; a log's own re-grade clears those marks first.
+            # 连续链依旧从整个回看区间开始数，但钱只落在项目最新标记之后，
+            # 所以常规遍历不会重发已经判定过的窗口；某条记录自己的重算会先清掉这些标记。
             write_from = max(
                 from_start,
                 settled_floor(conn, account_id, kind, item_id, unit, every, TARGET_WINDOW_SOURCES[kind], True),
@@ -1941,14 +1941,14 @@ def settle_target_rules(
 
 
 def streak_start(unit: str, today: str, rule_set_at: str | None) -> str:
-    """Earliest window a streak rule still grades: a bounded lookback that never reaches before the rule."""
+    """连续规则还会判定的最早窗口：有界的回看，且绝不越过规则设定日。"""
     start = period_shift(unit, 1, period_start(unit, today), -SETTLE_LOOKBACK_PERIODS[unit])
     anchor = str(rule_set_at or "")[:10]
     return max(start, full_window_start(unit, 1, anchor)) if anchor else start
 
 
 def streak_rule_items(conn: sqlite3.Connection, account_id: int | None = None) -> list[dict[str, Any]]:
-    """Deduct items whose effective rule pays a streak fine for this child."""
+    """这个孩子名下、生效规则会发连续罚分的扣分项目。"""
     return [
         item
         for item in scored_items(conn, "deduct", account_id)
@@ -1963,7 +1963,7 @@ def settle_streaks(
     only_from: str = "",
     only_item_id: int | None = None,
 ) -> None:
-    """Deduct items pay an extra deduction for every N straight periods they were scored."""
+    """扣分项目每连续 N 个周期被打分，就额外多扣一次。"""
     if not account_ids:
         return
     today = current_date()
@@ -1998,7 +1998,7 @@ def settle_streaks(
             streak = 0
             for period in period_range(unit, start, period_start(unit, today)):
                 streak = streak + 1 if period in periods else 0
-                # The chain counts from the whole lookback; only the chosen tail may write.
+                # 连续段从整个回看区间开始数；只有选中的尾巴那一段可以写入。
                 if not streak or streak % target or period < from_start:
                     continue
                 settle_date = period_end(unit, period)
@@ -2056,7 +2056,7 @@ def item_name_map(conn: sqlite3.Connection) -> dict[tuple[str, int], str]:
 
 
 def has_duplicate_item_name(conn: sqlite3.Connection, table: str, name: str, item_id: int | None = None) -> bool:
-    """Same-name items split the history of one habit across two rows, so block them at write time."""
+    """同名项目会把同一个习惯的历史拆到两行上，所以落笔时就拦住。"""
     sql = f"SELECT 1 FROM {table} WHERE name = ? COLLATE NOCASE"
     params: list[Any] = [name]
     if item_id is not None:
@@ -2112,7 +2112,7 @@ def daily_series(conn: sqlite3.Connection, account_id: int, dates: list[str]) ->
 
 
 def flow_groups(conn: sqlite3.Connection, account_ids: list[int], start_date: str | None) -> dict[str, Any]:
-    """Group records by project and direction for the pie charts and the recent gain/loss lists."""
+    """按项目和方向给记录分组，供饼图和最近的收支列表使用。"""
     empty = {"projects": {"earn": [], "deduct": [], "reward": [], "other": []}, "gained": [], "lost": []}
     if not account_ids:
         return empty
@@ -2131,7 +2131,7 @@ def flow_groups(conn: sqlite3.Connection, account_ids: list[int], start_date: st
     for row in rows:
         amount = int(row["amount"])
         if not amount:
-            # Quantity logs carry no points yet, so they belong to the project's progress, not to the flow charts.
+            # 数量录入还没有分值，所以它们属于项目的进度，不进收支图。
             continue
         sign = 1 if amount > 0 else -1
         kind = row["item_kind"] or ""
@@ -2161,7 +2161,7 @@ def flow_groups(conn: sqlite3.Connection, account_ids: list[int], start_date: st
 
 
 def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: str, period_count: int) -> dict[str, Any]:
-    """One row per child and earn/deduct item across the last N windows: how often it was logged, with the coins split into work and settlement."""
+    """近 N 个窗口里，每个孩子 × 加/扣分项目一行：记录了多少天，并把积分拆成完成与结算两部分。"""
     current = period_start(unit, current_date())
     periods = []
     start = period_shift(unit, 1, current, 1 - period_count)
@@ -2178,7 +2178,7 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
     params: list[Any] = [*account_ids, periods[0]["start"], periods[-1]["end"]]
     items_of: dict[str, list[dict[str, Any]]] = {}
     for kind in ("earn", "deduct"):
-        # Only earn items carry a quantity measure; deduct items always count occurrences.
+        # 只有加分项目带数量口径；扣分项目一律按次数统计。
         measure = "target_measure" if kind == "earn" else "NULL AS target_measure"
         items_of[kind] = [
             dict(row) for row in conn.execute(f"SELECT id, name, {measure} FROM {ITEM_TABLES[kind]}").fetchall()
@@ -2228,7 +2228,7 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
             tally["count"] += 1
             tally["quantity"] += int(row["quantity"] or 0)
             tally["coins"] += int(row["amount"])
-    # Settlement rows ride on the same item, so their coins stay a separate column instead of inflating what was earned.
+    # 结算记录挂在同一个项目上，所以它们的积分单独占一列，不掺进完成所得里。
     for row in conn.execute(
         f"""
         SELECT account_id, item_kind, item_id, title, date, amount, source FROM records
@@ -2266,7 +2266,7 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
                 for key in totals:
                     totals[key] += tally[key]
             found.append({**entry, "total": totals})
-        # Children come first, then the money: a parent reads the table one child at a time.
+        # 先按孩子排，再按分值排：家长是一张表按孩子逐个读的。
         found.sort(
             key=lambda item: (
                 item["account_id"],
@@ -2371,9 +2371,9 @@ REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 QUOTE_ATTRS = {'"': "&quot;"}
-# escape() only handles the markup characters; XML 1.0 additionally forbids these control codes, which a pasted item name can carry.
+# escape() 只处理尖括号那类字符；XML 1.0 另外禁止下面这些控制码，而粘贴进来的项目名可能带着它们。
 XML_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
-# Style slots used by the target sheet: 0 default, 1 title, 2 head cell, 3 name cell, 4 bordered box.
+# 目标表用到的样式槽位：0 默认、1 大标题、2 表头单元格、3 项目名单元格、4 带边框的格子。
 XLSX_STYLES = (
     f'{XML_HEADER}<styleSheet xmlns="{SHEET_NS}">'
     '<fonts count="3">'
@@ -2420,8 +2420,8 @@ def xlsx_text_cell(ref: str, text: str, style: int) -> str:
     return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{escape(XML_CONTROL_CHARS.sub("", text))}</t></is></c>'
 
 
-XLSX_CELL_PADDING = 1.5  # the border and cursor room Excel keeps away from a cell's text
-# The lower bounds keep the boxes writable and the upper ones stop one long item name from stretching the whole sheet.
+XLSX_CELL_PADDING = 1.5  # 边框和光标占的宽度，Excel 会把这些留在文字之外
+# 下限保证格子还能手写，上限防止一个过长的项目名把整张表拉宽。
 XLSX_NAME_BOUNDS = (18.0, 34.0)
 XLSX_GOAL_BOUNDS = (9.0, 16.0)
 XLSX_BOX_BOUNDS = (6.0, 8.0)
@@ -2430,7 +2430,7 @@ XLSX_BODY_LINE_HEIGHT = 15.0
 
 
 def xlsx_display_width(text: str) -> float:
-    """Excel sizes a column in default-font "0" glyphs, so CJK, Hangul and fullwidth punctuation count as two."""
+    """Excel 按默认字体的「0」字宽量列宽，所以中日韩、谚文和全角标点都算两个字。"""
     return sum(2 if 0x2E80 <= ord(ch) <= 0xFF60 else 1 for ch in text)
 
 
@@ -2444,7 +2444,7 @@ def xlsx_line_count(text: str, width: float) -> int:
 
 
 def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) -> str:
-    """Merged title band, two frozen head rows, then one bordered box per unit for handwriting."""
+    """合并的大标题带、冻结的两行表头，然后每一期一个带边框的格子，供手写填写。"""
     columns = len(heads[0])
     last_column = xlsx_column(columns)
     body_start = len(heads) + 2
@@ -2484,11 +2484,11 @@ def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) ->
 
 
 def xlsx_tab_name(raw: str, index: int, used: set[str]) -> str:
-    """Excel forbids a handful of characters in a tab name, caps it at 31 characters, and reads two names differing only in case as one sheet."""
+    """Excel 在标签名里禁用若干字符、长度上限 31，并把只差大小写的两个名字当成同一个工作表。"""
     name = re.sub(r"[\\/*?:\[\]]", "_", XML_CONTROL_CHARS.sub("_", raw)).strip().strip(".")[:31] or f"孩子{index}"
     base, step = name, 1
     while name.lower() in used:
-        # The counter has to fit inside the same 31 characters as the name it decorates.
+        # 计数后缀必须和它装饰的项目名一起塞进同样的 31 个字符里。
         name = f"{base[:29 - len(str(step))]}({step})"
         step += 1
     used.add(name.lower())
@@ -2496,7 +2496,7 @@ def xlsx_tab_name(raw: str, index: int, used: set[str]) -> str:
 
 
 def xlsx_workbook(sheets: list[tuple[str, str]]) -> bytes:
-    """The five parts Excel needs; cells carry inline strings so no shared-string table has to stay in sync."""
+    """Excel 需要的五个部件；单元格用内联字符串，这样就不必再维护一张同步的共享字符串表。"""
     overrides = "".join(
         f'<Override PartName="/xl/worksheets/sheet{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
         for index in range(1, len(sheets) + 1)
@@ -2541,7 +2541,7 @@ def xlsx_workbook(sheets: list[tuple[str, str]]) -> bytes:
 
 
 def target_sheet_request(payload: dict[str, Any]) -> dict[str, Any]:
-    """The browser already renders this sheet, so export re-uses its wording; the caps only bound the workbook size."""
+    """浏览器本来就在渲染这张表，所以导出复用它的话术；这里的上限只为约束工作簿体积。"""
     unit = str(payload.get("unit") or "").strip().lower()
     if unit not in TARGET_SHEET_UNITS:
         raise ValueError(f"导出周期只能选{unit_choice_text(TARGET_SHEET_UNITS)}")
@@ -2820,7 +2820,7 @@ def state_payload(conn: sqlite3.Connection, user: sqlite3.Row) -> dict[str, Any]
     settle_target_rules(conn, settle_ids, AUTO_SETTLE_UNITS)
     settle_streaks(conn, settle_ids, AUTO_SETTLE_UNITS)
     records = conn.execute(
-        "SELECT id, title, amount, type, date, time, source, quantity FROM records WHERE account_id = ? ORDER BY id DESC",
+        "SELECT id, title, amount, type, date, time, source, quantity, item_kind, item_id FROM records WHERE account_id = ? ORDER BY id DESC",
         (account_id,),
     ).fetchall() if account_id is not None else []
     earn_items = [
@@ -2865,7 +2865,7 @@ def api_error(message: str, status: int = 400):
 
 
 def find_custom_asset(asset_key: str) -> Path | None:
-    """Find a user image whether it is flat or nested by an upload tool."""
+    """无论用户图片是平铺的还是上传工具嵌套过的，都能找到。"""
     if asset_key not in CUSTOM_ASSET_KEYS:
         return None
     custom_dir = RESOURCE_DIR / "static" / "custom"
@@ -2884,7 +2884,7 @@ def find_custom_asset(asset_key: str) -> Path | None:
 
 @app.after_request
 def cache_shipped_images(response: Response) -> Response:
-    # Shipped art changes only with the image; scripts and user uploads must revalidate so an upgrade can't leave a stale UI.
+    # 随包发布的图片只在换图时变动；脚本和用户上传的资源必须每次重新校验，升级才不会留下过期界面。
     if response.status_code == 200 and request.path.startswith(("/static/illustrations/", "/static/avatars/")):
         response.headers["Cache-Control"] = "public, max-age=86400"
     return response
@@ -3121,7 +3121,7 @@ CHILD_HISTORY_TABLES = ("records", "point_requests", "task_assignments", "accoun
 
 
 def clear_child_history(conn: sqlite3.Connection, account_id: int) -> None:
-    """Removes one child's activity and level, leaving the account row and its item bindings."""
+    """清掉某个孩子的活动和等级，保留账号行和它的项目绑定。"""
     for table in CHILD_HISTORY_TABLES:
         conn.execute(f"DELETE FROM {table} WHERE account_id = ?", (account_id,))
     conn.execute("DELETE FROM app_settings WHERE key = ?", (adventure_level_key(account_id),))
@@ -3509,7 +3509,7 @@ def announcement_detail(announcement_id: int):
 
 
 def noted_title(note: str, name: str) -> str:
-    """Hand-written logs keep the note next to the item name; settlement titles stay bare because their source says why."""
+    """手写的记录把备注放在项目名旁边；结算记录的标题保持干净，因为它们的 source 已经说明了来由。"""
     return f"{name}（{note}）" if note else name
 
 
@@ -3543,7 +3543,7 @@ def create_transaction():
                     name, points_value = noted_title(name, item["name"]), item["points"]
                     item_kind = "earn"
                 if item is not None and is_quantity(item):
-                    # Quantity items only log how much was done; the points arrive when the window closes.
+                    # 数量口径的项目只记录做了多少；分值要等窗口结算才到账。
                     quantity = positive_int(payload.get("quantity") or 0, "数量")
                     amount = 0
                 else:
@@ -3656,7 +3656,7 @@ def create_transaction():
                     quantity,
                 ),
             )
-            # Re-grade before the response below, so its badges and payouts already include this log.
+            # 在下面这串应答之前先重算，让应答里的角标和发放已经包含这条记录。
             regrade_after_log(conn, account_id, item_kind, item_id, transaction_date)
             return jsonify({"record_id": cursor.lastrowid, **state_payload(conn, user)}), 201
     except (TypeError, ValueError) as exc:
@@ -3709,7 +3709,7 @@ def approve_request(request_id: int):
             "UPDATE point_requests SET status = 'approved', reviewed_at = ?, reviewer_id = ? WHERE id = ?",
             (now_iso(), user["id"], request_id),
         )
-        # An approval can land inside an already-closed window, so it re-grades its item like any other log.
+        # 审批通过的记录可能落在一个已经闭合的窗口里，所以它和别的记录一样重算自己的项目。
         regrade_after_log(
             conn,
             int(point_request["account_id"]),
@@ -3756,7 +3756,7 @@ def undo_transaction(record_id: int):
         if removed["source"] in STREAK_SOURCES:
             return api_error("连续奖惩记录不能单独撤销，请用首页的重新核算调整", 409)
         conn.execute("DELETE FROM records WHERE id = ? AND account_id = ?", (record_id, account_id))
-        # Only a log regrades: dropping a payout is a one-off override, not a reason to re-settle the window.
+        # 只有新增记录会触发重算：撤销一笔发放是一次性改判，不构成重结整个窗口的理由。
         if removed["source"] not in AUTO_SETTLEMENT_SOURCES:
             regrade_after_log(conn, account_id, removed["item_kind"], removed["item_id"], removed["date"])
         return jsonify(state_payload(conn, user))
@@ -3814,7 +3814,7 @@ def item_detail(kind: str, item_id: int):
             conn.execute(f"DELETE FROM {table} WHERE id = ?", (item_id,))
             conn.execute("DELETE FROM item_bindings WHERE item_kind = ? AND item_id = ?", (kind, item_id))
             conn.execute("DELETE FROM item_rule_overrides WHERE item_kind = ? AND item_id = ?", (kind, item_id))
-            # Settlement marks and payout records stay: deleting a project must not rewrite what was already graded.
+            # 水位标记和发放记录都保留：删除项目不该改写已经判定过的历史。
             return jsonify({"deleted": True})
         payload = request.get_json(silent=True) or {}
         name = str(payload.get("name", "")).strip()
@@ -3833,7 +3833,7 @@ def item_detail(kind: str, item_id: int):
         if rule is None:
             conn.execute(f"UPDATE {table} SET name = ?, points = ?, icon = ? WHERE id = ?", (name, points, icon, item_id))
         else:
-            # Changing a scoring rule re-anchors streak history; editing a submit cap alone must not erase past periods.
+            # 改计分规则会重新锚定连续历史；只改提交上限不该抹掉往期。
             changed = any(existing[column] != value for column, value in rule.items() if column in RULE_ANCHOR_FIELDS)
             rule_set_at = existing["rule_set_at"]
             if changed or (rule_is_active(rule) and not rule_set_at):
@@ -3881,7 +3881,7 @@ def update_item_bindings(account_id: int):
         bindings = payload.get("bindings")
         if not isinstance(bindings, list) or not bindings:
             return api_error("没有需要保存的绑定")
-        # Validate the whole batch before touching the table: connection() commits on return, so an early exit would persist a partial binding set.
+        # 先校验整批再动表：connection() 在返回时就提交，提前退出会留下半套绑定。
         validated = []
         for entry in bindings:
             kind = str(entry.get("kind") or "") if isinstance(entry, dict) else ""
@@ -3902,7 +3902,7 @@ def update_item_bindings(account_id: int):
 @app.route("/api/item-rules/<int:account_id>", methods=["PUT", "DELETE"])
 @require_admin
 def update_item_rule(account_id: int):
-    """One child's rule snapshot for one item: write it, copy another child's, or drop back to the library rule."""
+    """某个孩子在单个项目上的规则快照：直接写、抄另一个孩子的，或者退回库里的规则。"""
     payload = request.get_json(silent=True) or {}
     kind = str(payload.get("kind") or "")
     if kind not in ("earn", "deduct"):
@@ -3936,7 +3936,7 @@ def update_item_rule(account_id: int):
                 return api_error("来源不能是当前孩子")
             if conn.execute("SELECT 1 FROM accounts WHERE id = ? AND role = 'child'", (source_id,)).fetchone() is None:
                 return api_error("来源孩子不存在", 404)
-            # Reading the source through the same override merge copies what that child actually scores by.
+            # 源孩子的规则也走同一套覆盖合并再读出来，抄过来的才是他实际计分的口径。
             body = effective_item(conn, kind, row, source_id)
         try:
             rule = item_rule_payload(kind, body)
@@ -3944,7 +3944,7 @@ def update_item_rule(account_id: int):
             return api_error(str(exc))
         if rule is None:
             return api_error("该项目没有计分规则")
-        # Anchor like a library edit: an unchanged copy keeps the old anchor, a real change re-anchors, a rule-less row has none to inherit.
+        # 像库里的编辑那样锚定：内容没变的复制保留旧锚点，真改了才重新锚定，没有规则的行本来就没锚点可继承。
         base = existing if existing is not None else row
         changed = any(base[column] != value for column, value in rule.items() if column in RULE_ANCHOR_FIELDS)
         anchor = base["rule_set_at"] if base["rule_set_at"] and not changed else now_iso()
@@ -3995,7 +3995,7 @@ def get_analytics():
 @app.post("/api/targets/export")
 @require_admin
 def export_target_sheet():
-    """Turn the target sheet the admin is looking at into a workbook; the wording stays owned by the page that renders it."""
+    """把管理员正在看的这张目标表变成工作簿；话术仍然由渲染它的那个页面持有。"""
     try:
         data = target_sheet_request(request.get_json(silent=True) or {})
     except ValueError as exc:
@@ -4020,10 +4020,10 @@ def export_target_sheet():
 @app.get("/api/settlements/periods")
 @require_admin
 def list_settlement_periods():
-    """Periods the manual settle bar lists for a unit; the newest one is still open and cannot be graded."""
+    """手动结算栏针对某个单位列出的期次；最新那一期还没结束，不能判定。"""
     unit = str(request.args.get("unit") or "").strip().lower()
     if unit == SETTLE_UNIT_ALL:
-        # A catch-up run spans every unit's unclaimed windows, so it has no single period to name or show as settled.
+        # 补结会横跨所有单位里未认领的窗口，所以它没有单一期次可以命名，也不能显示为已结算。
         periods = [{"start": "", "end": current_date(), "label": "所有未结算期次", "closed": True, "settled": False}]
         return jsonify({"unit": unit, "periods": periods})
     if unit not in MANUAL_SETTLE_UNITS:
@@ -4036,7 +4036,7 @@ def list_settlement_periods():
 @app.post("/api/settlements/run")
 @require_admin
 def run_settlement():
-    """Grade one period unit's closed windows on demand; day rules keep settling whenever the page loads."""
+    """按需判定某个期次单位下所有已闭合的窗口；按天的规则仍然在每次页面加载时继续结算。"""
     payload = request.get_json(silent=True) or {}
     unit = str(payload.get("unit") or "").strip().lower()
     if unit != SETTLE_UNIT_ALL and unit not in MANUAL_SETTLE_UNITS:
@@ -4110,7 +4110,7 @@ def not_found(error):
 
 @app.errorhandler(413)
 def payload_too_large(error):
-    # Flask raises this before the view runs, so without this handler the client gets HTML where the SPA expects JSON.
+    # Flask 在进视图之前就抛这个异常；没有下面的处理器，客户端会在 SPA 期望 JSON 的地方收到 HTML。
     return api_error("提交内容过大，请减少后重试", 413)
 
 
