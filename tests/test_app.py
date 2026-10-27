@@ -349,7 +349,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.create_child(username="child", display_name="小朋友")
         earn_id = self.create_item("earn", "完成作业", 10)
         state = self.state()
-        self.assertEqual(state["version"], "0.8.15")
+        self.assertEqual(state["version"], "0.8.16")
         self.assertEqual(state["user"]["avatar"], "adult-male")
         self.assertEqual(state["active_child"]["avatar"], "boy")
 
@@ -748,6 +748,59 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(data["gamification"]["coins"], 40)
         self.assertEqual(data["gamification"]["experience"], 25)
         self.assertTrue(any(item["achievement_key"] == "first-quest" and item["unlocked"] for item in data["achievements"]))
+
+    def test_reclaiming_a_task_rejected_today_reports_conflict(self):
+        self.create_child(username="redokid", display_name="重做玩家", password="quest123")
+        task_id = self.client.post(
+            "/api/tasks",
+            json={"title": "倒垃圾", "task_type": "daily", "difficulty": "easy", "reward_coins": 5, "reward_exp": 2},
+        ).get_json()["task"]["id"]
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": "redokid", "password": "quest123"})
+        assignment_id = self.client.post(f"/api/tasks/{task_id}/claim").get_json()["assignment_id"]
+        self.assertEqual(self.client.post(f"/api/task-assignments/{assignment_id}/submit").status_code, 200)
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+        self.assertEqual(self.client.post(f"/api/task-assignments/{assignment_id}/reject").status_code, 200)
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": "redokid", "password": "quest123"})
+        response = self.client.post(f"/api/tasks/{task_id}/claim")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["error"], "你已经领取过这个任务")
+        self.assertEqual(self.client.post(f"/api/task-assignments/{assignment_id}/submit").status_code, 200)
+
+    def test_editing_a_task_keeps_omitted_fields_and_deleting_hides_it(self):
+        self.create_child(username="questeditor", display_name="改单玩家", password="quest123")
+        task_id = self.client.post(
+            "/api/tasks",
+            json={
+                "title": "倒垃圾",
+                "description": "袋子换好放回原位",
+                "category": "家庭",
+                "task_type": "daily",
+                "difficulty": "easy",
+                "reward_coins": 10,
+                "reward_exp": 4,
+                "icon": "cleaning.svg",
+            },
+        ).get_json()["task"]["id"]
+
+        updated = self.client.put(f"/api/tasks/{task_id}", json={"title": "倒垃圾并换袋", "reward_coins": 16})
+        self.assertEqual(updated.status_code, 200)
+        task = next(item for item in updated.get_json()["state"]["tasks"] if item["id"] == task_id)
+        self.assertEqual(task["title"], "倒垃圾并换袋")
+        self.assertEqual(task["reward_coins"], 16)
+        self.assertEqual(task["description"], "袋子换好放回原位")
+        self.assertEqual(task["icon"], "cleaning.svg")
+        self.assertEqual(task["difficulty"], "easy")
+
+        deleted = self.client.delete(f"/api/tasks/{task_id}")
+        self.assertTrue(deleted.get_json()["deleted"])
+        self.assertNotIn(task_id, [item["id"] for item in deleted.get_json()["state"]["tasks"]])
+        self.assertEqual(self.client.put(f"/api/tasks/{task_id}", json={"title": "改名"}).status_code, 404)
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": "questeditor", "password": "quest123"})
+        self.assertEqual(self.client.post(f"/api/tasks/{task_id}/claim").status_code, 404)
 
     def test_builtin_package_icon_is_allowed_and_unknown_icon_is_rejected(self):
         self.create_child(username="icon-child", display_name="Icon Child", password="child123")

@@ -10,6 +10,7 @@ const appState = {
   accountEditId: null,
   announcementEditId: null,
   announcementPopupTimer: null,
+  taskEditId: null,
   bindingChildId: null,
   ruleSource: { earn: null, deduct: null },
   analytics: null,
@@ -295,7 +296,10 @@ function syncSettleRun() {
   document.getElementById("settle-run").disabled = unit.value !== appState.settlePeriodUnit || option?.dataset.closed !== "1";
 }
 
+let settlePeriodRequest = 0;
+
 async function loadSettlePeriods() {
+  const requestId = ++settlePeriodRequest;
   const unit = document.getElementById("settle-unit").value;
   const select = document.getElementById("settle-period");
   // 结算跑完后也会重载，所以要把管理员正在看的那一期留住。
@@ -303,12 +307,14 @@ async function loadSettlePeriods() {
   syncSettleRun();
   try {
     const data = await api(`/api/settlements/periods?unit=${encodeURIComponent(unit)}`);
+    if (requestId !== settlePeriodRequest) return;
     select.innerHTML = data.periods
       .map((row) => `<option value="${row.start}" data-closed="${row.closed ? 1 : 0}" data-settled="${row.settled ? 1 : 0}">${escapeHtml(row.label)}${row.closed ? (row.settled ? "（已结算）" : "") : "（未结束）"}</option>`)
       .join("");
     if (data.periods.some((row) => row.start === previous)) select.value = previous;
     appState.settlePeriodUnit = unit;
   } catch (error) {
+    if (requestId !== settlePeriodRequest) return;
     select.innerHTML = "";
     appState.settlePeriodUnit = "";
     showToast(error.message);
@@ -526,7 +532,7 @@ function renderItemList(container, items, kind, mode) {
     const badge = dayCount ? `<small class="count-badge">${pointSign}${dayCount}</small>` : "";
     const weekNote = weekTarget ? `<span class="week-chip">${targetPeriodText(item, true)} ${Number(item.week_count || 0)}/${weekTarget}</span>` : "";
     const pointsNote = byQuantity ? "" : `<span class="item-points ${kind === "deduct" || isExchange ? "expense" : "income"}">${pointSign}${pointsText(actualPoints)}</span>`;
-    const quantityInput = byQuantity ? `<input class="qty-input" type="number" min="1" inputmode="numeric" placeholder="数量" data-qty-for="${item.id}">` : "";
+    const quantityInput = byQuantity ? `<input class="qty-input" type="number" min="1" inputmode="numeric" placeholder="数量">` : "";
     const noteInput = mode === "admin" && !isExchange ? `<input class="note-input" type="text" maxlength="24" placeholder="原因">` : "";
     const undoTarget = canUndo ? undoTargetFor(kind, item.id, tallyDate) : null;
     const undoButton = undoTarget ? `<button class="button button-small button-outline-danger row-undo" data-action="undo" data-id="${undoTarget.id}" title="撤销${RECORD_SOURCE_LABEL[undoTarget.source] || (kind === "earn" ? "加积分" : "扣积分")}" type="button">撤销</button>` : "";
@@ -535,26 +541,40 @@ function renderItemList(container, items, kind, mode) {
 }
 
 function renderManagement() {
+  syncBindingSelection();
   ["earn", "deduct", "reward"].forEach((kind) => {
     renderManageList(`${kind}-manage-list`, libraryItems(kind), kind);
   });
   renderBindingPanel();
 }
 
+// 选中孩子和「抄自」来源要先定下来：项目行和来源下拉共用同一份状态，后渲染的那个否则拿到旧值。
+function syncBindingSelection() {
+  const children = appState.data.children || [];
+  const keep = children.find((child) => Number(child.id) === Number(appState.bindingChildId));
+  appState.bindingChildId = keep ? Number(keep.id) : Number(appState.data.active_child_id || children[0]?.id) || null;
+  const sources = ruleSourceChildren();
+  ["earn", "deduct"].forEach((kind) => {
+    const source = sources.find((child) => Number(child.id) === appState.ruleSource[kind]) || sources[0];
+    appState.ruleSource[kind] = source ? Number(source.id) : null;
+  });
+}
+
+function ruleSourceChildren() {
+  return (appState.data.children || []).filter((child) => Number(child.id) !== Number(appState.bindingChildId));
+}
+
 const BINDING_KIND_LABELS = { earn: "加积分项目", deduct: "扣积分项目", reward: "兑换奖励" };
 
 function renderRuleSync() {
-  const target = Number(appState.bindingChildId);
-  const sources = (appState.data.children || []).filter((child) => Number(child.id) !== target);
+  const sources = ruleSourceChildren();
   ["earn", "deduct"].forEach((kind) => {
     const box = document.querySelector(`.rule-sync[data-rule-kind="${kind}"]`);
     if (!box) return;
     box.classList.toggle("hidden", !sources.length || !libraryItems(kind).length);
     const select = box.querySelector(".rule-sync-source");
     select.innerHTML = sources.map((child) => `<option value="${child.id}">${escapeHtml(child.display_name)}</option>`).join("");
-    const remembered = sources.find((child) => Number(child.id) === appState.ruleSource[kind]) || sources[0];
-    appState.ruleSource[kind] = remembered ? Number(remembered.id) : null;
-    select.value = String(remembered?.id ?? "");
+    select.value = String(appState.ruleSource[kind] ?? "");
   });
 }
 
@@ -571,10 +591,7 @@ function renderBindingPanel() {
     renderRuleSync();
     return;
   }
-  const selected = children.some((child) => Number(child.id) === Number(appState.bindingChildId))
-    ? Number(appState.bindingChildId)
-    : Number(appState.data.active_child_id || children[0].id);
-  appState.bindingChildId = selected;
+  const selected = appState.bindingChildId;
   picker.innerHTML = children.map((child) => `<button class="chip-button${Number(child.id) === selected ? " active" : ""}" data-action="select-binding-child" data-child="${child.id}" type="button">${escapeHtml(child.display_name)}</button>`).join("");
   let excludedTotal = 0;
   grid.innerHTML = ["earn", "deduct", "reward"].map((kind) => {
@@ -716,7 +733,7 @@ function renderManageList(elementId, items, kind) {
   const isExpense = kind === "deduct" || kind === "reward";
   const childTotal = (appState.data.children || []).length;
   const childId = appState.bindingChildId;
-  const source = kind === "reward" ? null : Number(appState.ruleSource[kind]) || null;
+  const source = kind === "reward" ? null : appState.ruleSource[kind];
   container.innerHTML = items.length ? items.map((base) => {
     const item = effectiveItem(childId, kind, base);
     const bound = boundChildCount(kind, item.id);
@@ -756,7 +773,9 @@ function taskActionMarkup(task) {
   const isAdmin = appState.data.user.role === "admin";
   if (isAdmin) {
     const pending = (task.assignments || []).filter((assignment) => assignment.status === "submitted");
-    return pending.length ? `<span class="quest-status quest-status-submitted">${pending.length} 人待验收</span>` : `<span class="muted">${task.participant_count || 0} 人参与</span>`;
+    const note = pending.length ? `<span class="quest-status quest-status-submitted">${pending.length} 人待验收</span>` : `<span class="muted">${task.participant_count || 0} 人参与</span>`;
+    const actions = `<div class="row-actions"><button class="button button-small button-outline" data-action="edit-task" data-id="${task.id}" type="button">编辑</button><button class="button button-small button-outline-danger" data-action="delete-task" data-id="${task.id}" type="button">删除</button></div>`;
+    return `${note}${actions}`;
   }
   const assignment = task.my_assignment;
   if (!assignment) return `<button class="button button-small button-primary" data-action="claim-task" data-id="${task.id}" type="button">领取任务</button>`;
@@ -1003,7 +1022,7 @@ const RECORD_SOURCE_LABEL = {
   target_streak_penalty: "连续未达标",
 };
 STREAK_UNITS.forEach((unit) => { RECORD_SOURCE_LABEL[`deduct_${unit}_streak`] = "连续扣分"; });
-// 连续奖惩没有水位居行，撤销掉的记录会被下一次结算原样补回，所以这几类不给撤销入口。
+// 连续奖惩不占水位行，撤销掉的记录会被下一次结算原样补回，所以这几类不给撤销入口。
 const NO_UNDO_SOURCES = new Set([
   "target_streak",
   "target_streak_penalty",
@@ -1505,8 +1524,6 @@ function renderQuestIconPicker() {
   renderIconGroups(container, document.getElementById("quest-icon-search")?.value || "", document.getElementById("quest-icon")?.value || "", "data-task-icon");
 }
 
-const ENTRY_HINT = { earn: "点击项目可直接发放", deduct: "点击项目可直接扣除" };
-
 function entryContext(kind) {
   return document.querySelector(`.entry-context[data-entry-kind="${kind}"]`);
 }
@@ -1525,8 +1542,6 @@ function renderEntryContext() {
     if (!form) return;
     if (!form.elements.date.value) form.elements.date.value = localDate();
     form.elements.date.max = localDate();
-    const hint = document.getElementById(`${kind}-list-hint`);
-    if (hint) hint.textContent = entryBackdated(kind) ? `点击项目补录到 ${form.elements.date.value}` : ENTRY_HINT[kind];
   });
 }
 
@@ -1829,6 +1844,73 @@ async function saveAdventureLevel(event) {
   }
 }
 
+function setQuestIcon(token, label = "") {
+  const select = document.getElementById("quest-icon");
+  if (!select || !token) return;
+  // 内置图标库里的图标不在那 12 个固定选项里，先补一枚 option 才选得中，否则保存时会把图标写回默认值。
+  if (![...select.options].some((option) => option.value === token)) {
+    select.add(new Option(label || token.replace(/\.svg$/i, ""), token));
+  }
+  select.value = token;
+  renderQuestIconPicker();
+}
+
+function findQuest(id) {
+  return (appState.data?.tasks || []).find((task) => Number(task.id) === Number(id));
+}
+
+function syncQuestEditorMode() {
+  const form = document.getElementById("quest-form");
+  if (!form) return;
+  const editing = Boolean(appState.taskEditId);
+  form.querySelector("button[type='submit']").textContent = editing ? "保存任务" : "发布任务";
+  document.getElementById("cancel-quest-edit")?.classList.toggle("hidden", !editing);
+}
+
+function resetQuestEditor() {
+  const form = document.getElementById("quest-form");
+  if (!form) return;
+  appState.taskEditId = null;
+  form.reset();
+  form.elements.reward_coins.value = 20;
+  form.elements.reward_exp.value = 10;
+  syncQuestEditorMode();
+}
+
+function openQuestEdit(id) {
+  const task = findQuest(id);
+  const form = document.getElementById("quest-form");
+  if (!task || !form) return;
+  appState.taskEditId = Number(task.id);
+  form.elements.title.value = task.title;
+  form.elements.description.value = task.description || "";
+  form.elements.category.value = task.category;
+  form.elements.task_type.value = task.task_type;
+  form.elements.difficulty.value = task.difficulty;
+  form.elements.reward_coins.value = task.reward_coins;
+  form.elements.reward_exp.value = task.reward_exp;
+  form.elements.due_date.value = task.due_date || "";
+  setQuestIcon(task.icon);
+  syncQuestEditorMode();
+  form.elements.title.focus();
+}
+
+async function deleteQuest(id) {
+  const task = findQuest(id);
+  const open = (task?.assignments || []).filter((assignment) => assignment.status !== "completed").length;
+  const ask = open
+    ? `还有 ${open} 条进度没有验收，删除后这个任务和这些提交都不再出现在任务大厅。确定删除「${task.title}」吗？`
+    : "删除后这个任务不再出现在任务大厅，孩子已经完成的历史记录仍然保留。确定吗？";
+  if (!await requestConfirm(ask, { title: "删除任务", confirmLabel: "删除" })) return;
+  try {
+    const result = await api(`/api/tasks/${id}`, { method: "DELETE" });
+    appState.data = result.state;
+    if (appState.taskEditId === Number(id)) resetQuestEditor();
+    render();
+    showToast("任务已删除");
+  } catch (error) { showToast(error.message); }
+}
+
 async function saveTask(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -1847,14 +1929,16 @@ async function saveTask(event) {
     showToast("请填写任务标题与奖励");
     return;
   }
+  const editing = appState.taskEditId;
   try {
-    const result = await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
+    const result = await api(editing ? `/api/tasks/${editing}` : "/api/tasks", {
+      method: editing ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
     appState.data = result.state;
-    form.reset();
-    form.elements.reward_coins.value = 20;
-    form.elements.reward_exp.value = 10;
+    resetQuestEditor();
     render();
-    showToast("悬赏任务已发布");
+    showToast(editing ? "悬赏任务已保存" : "悬赏任务已发布");
   } catch (error) { showToast(error.message); }
 }
 
@@ -1960,16 +2044,7 @@ document.addEventListener("click", async (event) => {
   }
   const taskIconTarget = event.target.closest("[data-task-icon]");
   if (taskIconTarget) {
-    const select = document.getElementById("quest-icon");
-    if (select) {
-      const token = taskIconTarget.dataset.taskIcon;
-      if (![...select.options].some((option) => option.value === token)) {
-        const label = taskIconTarget.getAttribute("aria-label") || "内置图标";
-        select.add(new Option(label, token));
-      }
-      select.value = token;
-      renderQuestIconPicker();
-    }
+    setQuestIcon(taskIconTarget.dataset.taskIcon, taskIconTarget.getAttribute("aria-label") || "");
     return;
   }
   const editorTarget = event.target.closest("[data-open-editor]");
@@ -1996,6 +2071,8 @@ document.addEventListener("click", async (event) => {
     if (action.dataset.action === "submit-task") await handleTaskAction("submit", Number(action.dataset.id));
     if (action.dataset.action === "approve-task") await handleTaskAction("approve", Number(action.dataset.id));
     if (action.dataset.action === "reject-task") await handleTaskAction("reject", Number(action.dataset.id));
+    if (action.dataset.action === "edit-task") openQuestEdit(Number(action.dataset.id));
+    if (action.dataset.action === "delete-task") await deleteQuest(Number(action.dataset.id));
     if (action.dataset.action === "edit-announcement") openAnnouncementEdit(Number(action.dataset.id));
     if (action.dataset.action === "delete-announcement") await deleteAnnouncement(Number(action.dataset.id));
     if (action.dataset.action === "undo") await undoRecord(Number(action.dataset.id));
@@ -2078,6 +2155,7 @@ document.getElementById("self-password-form").addEventListener("submit", saveSel
 document.getElementById("currency-form").addEventListener("submit", saveCurrencySettings);
 document.getElementById("adventure-level-form")?.addEventListener("submit", saveAdventureLevel);
 document.getElementById("quest-form").addEventListener("submit", saveTask);
+document.getElementById("cancel-quest-edit")?.addEventListener("click", resetQuestEditor);
 document.getElementById("announcement-form")?.addEventListener("submit", saveAnnouncement);
 document.getElementById("cash-exchange-form").addEventListener("submit", saveCashExchange);
 document.querySelector("#cash-exchange-form input[name='points']").addEventListener("input", updateCashExchangePreview);
@@ -2176,6 +2254,7 @@ document.getElementById("settle-run").addEventListener("click", async () => {
     ? "该期已结算过，重算会撤销它已入账的奖惩，并连同其后各期按当前记录重算，确定吗？"
     : `将结算全部孩子${scope}的奖惩，确定吗？`;
   if (!await requestConfirm(ask, settled ? { title: "重新核算", confirmLabel: "重算" } : { title: "手动结算", confirmLabel: "结算", danger: false })) return;
+  document.getElementById("settle-run").disabled = true;
   try {
     const data = await api("/api/settlements/run", { method: "POST", body: JSON.stringify({ unit: unit.value, period: period.value, force: settled }) });
     const written = data.settlement;
@@ -2183,7 +2262,10 @@ document.getElementById("settle-run").addEventListener("click", async () => {
     render();
     await loadSettlePeriods();
     showToast(written.entries ? `${settled ? "重算写入" : "已结算"} ${written.entries} 条，共 ${signed(written.points)} 分` : (settled ? "重算后没有奖惩" : "没有待结算的奖惩"));
-  } catch (error) { showToast(error.message); }
+  } catch (error) {
+    showToast(error.message);
+    syncSettleRun();
+  }
 });
 
 renderQuestIconPicker();

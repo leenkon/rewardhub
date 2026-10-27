@@ -52,9 +52,14 @@ def generated_secret_key() -> str:
 # Compose 转发的是 "${SECRET_KEY:-}"，所以未设置时传来的是空串，而不是根本没有这个变量。
 SECRET_KEY = os.getenv("SECRET_KEY") or generated_secret_key()
 PASSWORD_ITERATIONS = 240_000
-APP_VERSION = "0.8.15"
-AVATAR_OPTIONS = {"boy", "girl", "adult-male", "adult-female"}
+APP_VERSION = "0.8.16"
 CHILD_AVATARS = {"boy", "girl"}
+ADULT_AVATARS = {"adult-male", "adult-female"}
+
+
+def avatar_choices(role: str) -> set[str]:
+    """头像分集只有孩子/成人两套，创建和改账号都走这里。"""
+    return CHILD_AVATARS if role == "child" else ADULT_AVATARS
 PROJECT_ICONS = {
     "television.svg", "book.svg", "homework.svg", "chore.svg", "sport.svg",
     "bedtime.svg", "snack.svg", "game.svg", "outing.svg", "points.svg",
@@ -84,6 +89,8 @@ ITEM_DEFAULT_ICONS = {"earn": "points.svg", "deduct": "warning.svg", "reward": "
 DEFAULT_SETTINGS = {"points_per_yuan": 100}
 TASK_TYPES = {"daily", "epic"}
 TASK_DIFFICULTIES = {"easy", "normal", "hard", "legendary"}
+# 可编辑列只有一份：新建与编辑共用它的顺序，INSERT 与 UPDATE 不再各写一遍字段名。
+TASK_COLUMNS = ("title", "description", "category", "task_type", "difficulty", "reward_coins", "reward_exp", "icon", "due_date")
 DEFAULT_ACHIEVEMENTS = [
     ("first-quest", "初次出征", "完成第一个现实任务", "points.svg", "completed_tasks", 1),
     ("habit-builder", "习惯养成", "完成 3 个任务，建立自己的节奏", "bedtime.svg", "completed_tasks", 3),
@@ -182,7 +189,7 @@ TARGET_WINDOW_SOURCES = {
     "earn": (TARGET_BONUS_SOURCES["earn"], "weekly_penalty", TARGET_STREAK_SOURCE, TARGET_STREAK_PENALTY_SOURCE),
     "deduct": (TARGET_BONUS_SOURCES["deduct"],),
 }
-# 撤销这几类记录会重算自己的窗口，所以只有水位行还在，发放才维持被撤销的状态。
+# 结算自己写出的 source：撤销这几类记录不重算窗口，只要水位行还在，发放就维持被撤销的状态。
 AUTO_SETTLEMENT_SOURCES = (
     *TARGET_WINDOW_SOURCES["earn"],
     *TARGET_WINDOW_SOURCES["deduct"],
@@ -1035,6 +1042,15 @@ def total_experience(conn: sqlite3.Connection, account_id: int) -> int:
     )
 
 
+def completed_task_count(conn: sqlite3.Connection, account_id: int) -> int:
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM task_assignments WHERE account_id = ? AND status = 'completed'",
+            (account_id,),
+        ).fetchone()[0]
+    )
+
+
 def calculated_adventure_level(conn: sqlite3.Connection, account_id: int | None) -> int:
     if account_id is None:
         return 1
@@ -1101,6 +1117,12 @@ def current_user(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return user
 
 
+def first_child_id(conn: sqlite3.Connection) -> int | None:
+    """还没选中孩子时的兜底：在册的第一个孩子，与统计遍历的顺序一致。"""
+    row = conn.execute("SELECT id FROM accounts WHERE role = 'child' AND active = 1 ORDER BY id LIMIT 1").fetchone()
+    return int(row["id"]) if row else None
+
+
 def active_child_id(conn: sqlite3.Connection, user: sqlite3.Row) -> int | None:
     if user["role"] == "child":
         return int(user["id"])
@@ -1111,11 +1133,10 @@ def active_child_id(conn: sqlite3.Connection, user: sqlite3.Row) -> int | None:
         ).fetchone()
         if child:
             return int(child["id"])
-    child = conn.execute("SELECT id FROM accounts WHERE role = 'child' AND active = 1 ORDER BY id LIMIT 1").fetchone()
-    if child:
-        session["selected_child_id"] = int(child["id"])
-        return int(child["id"])
-    return None
+    fallback = first_child_id(conn)
+    if fallback is not None:
+        session["selected_child_id"] = fallback
+    return fallback
 
 
 def require_user(handler):
@@ -1491,7 +1512,7 @@ def deduct_completion_dates(conn: sqlite3.Connection, account_id: int, since_dat
 
 
 def cap_window(period: str, day: str) -> tuple[str, str]:
-    """日历窗口都从所在月份的 1 号起算；周窗口以周一为界。"""
+    """提交上限的日历窗口：周窗口以周一为界，月/季/半年/年窗口从各自周期首月的 1 号起算。"""
     if period == "day":
         return day, day
     if period == "week":
@@ -2640,12 +2661,7 @@ def gamification_payload(conn: sqlite3.Connection, account_id: int | None) -> di
             "earn_bonus_percent": 0,
             "exchange_discount_percent": 0,
         }
-    completed_tasks = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM task_assignments WHERE account_id = ? AND status = 'completed'",
-            (account_id,),
-        ).fetchone()[0]
-    )
+    completed_tasks = completed_task_count(conn, account_id)
     experience = total_experience(conn, account_id)
     unlocked = int(
         conn.execute(
@@ -2760,12 +2776,7 @@ def announcement_rows(conn: sqlite3.Connection, user: sqlite3.Row) -> list[dict[
 
 
 def unlock_achievements(conn: sqlite3.Connection, account_id: int) -> None:
-    completed_tasks = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM task_assignments WHERE account_id = ? AND status = 'completed'",
-            (account_id,),
-        ).fetchone()[0]
-    )
+    completed_tasks = completed_task_count(conn, account_id)
     epic_tasks = int(
         conn.execute(
             """
@@ -2970,9 +2981,9 @@ def login():
         session.clear()
         session["user_id"] = int(user["id"])
         if user["role"] == "admin":
-            first_child = conn.execute("SELECT id FROM accounts WHERE role = 'child' AND active = 1 ORDER BY id LIMIT 1").fetchone()
-            if first_child:
-                session["selected_child_id"] = int(first_child["id"])
+            default_child = first_child_id(conn)
+            if default_child is not None:
+                session["selected_child_id"] = default_child
         else:
             session["selected_child_id"] = int(user["id"])
         return jsonify(state_payload(conn, user))
@@ -3100,7 +3111,7 @@ def create_account():
         return api_error("密码至少需要 6 位")
     if role not in ("admin", "child"):
         return api_error("账号类型无效")
-    if avatar not in AVATAR_OPTIONS or (role == "child" and avatar not in CHILD_AVATARS):
+    if avatar not in avatar_choices(role):
         return api_error("头像类型无效")
     if not display_name:
         display_name = username
@@ -3165,7 +3176,7 @@ def update_account(account_id: int):
         target = conn.execute("SELECT * FROM accounts WHERE id = ? AND active = 1", (account_id,)).fetchone()
         if target is None:
             return api_error("账号不存在", 404)
-        allowed_avatars = CHILD_AVATARS if target["role"] == "child" else {"adult-male", "adult-female"}
+        allowed_avatars = avatar_choices(target["role"])
         if not avatar:
             avatar = target["avatar"]
         if avatar not in allowed_avatars:
@@ -3243,53 +3254,50 @@ def update_settings():
         return jsonify(state_payload(conn, user))
 
 
+def task_payload(payload: dict[str, Any], task: sqlite3.Row | None) -> dict[str, Any]:
+    """悬赏任务的可编辑字段：新建缺省用默认值，编辑时没带上的列沿用库里那份。"""
+
+    def fallback(key: str, default: Any) -> Any:
+        return payload.get(key, task[key] if task is not None else default)
+
+    due_date_value = str(payload.get("due_date") or "").strip()
+    result = {
+        "title": str(fallback("title", "")).strip()[:80],
+        "description": str(fallback("description", "")).strip()[:240],
+        "category": str(fallback("category", "生活")).strip()[:30] or "生活",
+        "task_type": str(fallback("task_type", "daily")).lower(),
+        "difficulty": str(fallback("difficulty", "normal")).lower(),
+        "reward_coins": positive_int(fallback("reward_coins", None), "积分奖励"),
+        "reward_exp": positive_int(fallback("reward_exp", None), "经验奖励"),
+        "icon": str(payload.get("icon") or (task["icon"] if task is not None else ITEM_DEFAULT_ICONS["earn"])),
+        "due_date": valid_date(due_date_value) if due_date_value else None,
+    }
+    if not result["title"]:
+        raise ValueError("任务标题不能为空")
+    if result["task_type"] not in TASK_TYPES:
+        raise ValueError("任务类型无效")
+    if result["difficulty"] not in TASK_DIFFICULTIES:
+        raise ValueError("任务难度无效")
+    if not valid_project_icon(result["icon"]):
+        raise ValueError("任务图标无效")
+    return result
+
+
 @app.post("/api/tasks")
 @require_admin
 def create_task():
     payload = request.get_json(silent=True) or {}
-    title = str(payload.get("title", "")).strip()[:80]
-    description = str(payload.get("description", "")).strip()[:240]
-    category = str(payload.get("category", "生活")).strip()[:30] or "生活"
-    task_type = str(payload.get("task_type", "daily")).lower()
-    difficulty = str(payload.get("difficulty", "normal")).lower()
-    icon = str(payload.get("icon") or "points.svg")
-    due_date_value = str(payload.get("due_date") or "").strip()
     try:
-        reward_coins = positive_int(payload.get("reward_coins"), "积分奖励")
-        reward_exp = positive_int(payload.get("reward_exp"), "经验奖励")
-        due_date = valid_date(due_date_value) if due_date_value else None
+        fields = task_payload(payload, None)
     except ValueError as exc:
         return api_error(str(exc))
-    if not title:
-        return api_error("任务标题不能为空")
-    if task_type not in TASK_TYPES:
-        return api_error("任务类型无效")
-    if difficulty not in TASK_DIFFICULTIES:
-        return api_error("任务难度无效")
-    if not valid_project_icon(icon):
-        return api_error("任务图标无效")
+    columns = ", ".join(TASK_COLUMNS)
+    marks = ", ".join("?" for _ in TASK_COLUMNS)
     with connection() as conn:
         user = current_user(conn)
         cursor = conn.execute(
-            """
-            INSERT INTO tasks(
-                title, description, category, task_type, difficulty,
-                reward_coins, reward_exp, icon, due_date, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                title,
-                description,
-                category,
-                task_type,
-                difficulty,
-                reward_coins,
-                reward_exp,
-                icon,
-                due_date,
-                user["id"],
-                now_iso(),
-            ),
+            f"INSERT INTO tasks({columns}, created_by, created_at) VALUES ({marks}, ?, ?)",
+            (*[fields[column] for column in TASK_COLUMNS], user["id"], now_iso()),
         )
         task = conn.execute("SELECT * FROM tasks WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return jsonify({"task": dict(task), "state": state_payload(conn, user)}), 201
@@ -3298,43 +3306,25 @@ def create_task():
 @app.route("/api/tasks/<int:task_id>", methods=["PUT", "DELETE"])
 @require_admin
 def task_detail(task_id: int):
+    payload = request.get_json(silent=True) or {}
     with connection() as conn:
         user = current_user(conn)
         task = conn.execute("SELECT * FROM tasks WHERE id = ? AND is_active = 1", (task_id,)).fetchone()
         if task is None:
             return api_error("任务不存在", 404)
         if request.method == "DELETE":
+            # 下架而非物理删除：孩子已领取或已提交的进度要留在账上，只是不再出现在任务大厅。
             conn.execute("UPDATE tasks SET is_active = 0 WHERE id = ?", (task_id,))
-            return jsonify({"deleted": True})
-        payload = request.get_json(silent=True) or {}
-        title = str(payload.get("title", "")).strip()[:80]
-        description = str(payload.get("description", "")).strip()[:240]
-        category = str(payload.get("category", task["category"])).strip()[:30] or "生活"
-        task_type = str(payload.get("task_type", task["task_type"])).lower()
-        difficulty = str(payload.get("difficulty", task["difficulty"])).lower()
-        icon = str(payload.get("icon") or task["icon"])
-        due_date_value = str(payload.get("due_date") or "").strip()
+            return jsonify({"deleted": True, "state": state_payload(conn, user)})
         try:
-            reward_coins = positive_int(payload.get("reward_coins", task["reward_coins"]), "积分奖励")
-            reward_exp = positive_int(payload.get("reward_exp", task["reward_exp"]), "经验奖励")
-            due_date = valid_date(due_date_value) if due_date_value else None
+            fields = task_payload(payload, task)
         except ValueError as exc:
             return api_error(str(exc))
-        if not title:
-            return api_error("任务标题不能为空")
-        if task_type not in TASK_TYPES or difficulty not in TASK_DIFFICULTIES:
-            return api_error("任务类型或难度无效")
-        if not valid_project_icon(icon):
-            return api_error("任务图标无效")
-        conn.execute(
-            """
-            UPDATE tasks SET title = ?, description = ?, category = ?, task_type = ?, difficulty = ?,
-                reward_coins = ?, reward_exp = ?, icon = ?, due_date = ?
-            WHERE id = ?
-            """,
-            (title, description, category, task_type, difficulty, reward_coins, reward_exp, icon, due_date, task_id),
-        )
-        return jsonify(state_payload(conn, user))
+        assignments = ", ".join(f"{column} = ?" for column in TASK_COLUMNS)
+        values = [fields[column] for column in TASK_COLUMNS]
+        conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", (*values, task_id))
+        updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return jsonify({"task": dict(updated), "state": state_payload(conn, user)})
 
 
 @app.post("/api/tasks/<int:task_id>/claim")
@@ -3363,13 +3353,17 @@ def claim_task(task_id: int):
         if existing is not None:
             return api_error("你已经领取过这个任务", 409)
         now = now_iso()
-        cursor = conn.execute(
-            """
-            INSERT INTO task_assignments(task_id, account_id, status, claim_date, claimed_at)
-            VALUES (?, ?, 'claimed', ?, ?)
-            """,
-            (task_id, user["id"], today, now),
-        )
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO task_assignments(task_id, account_id, status, claim_date, claimed_at)
+                VALUES (?, ?, 'claimed', ?, ?)
+                """,
+                (task_id, user["id"], today, now),
+            )
+        except sqlite3.IntegrityError:
+            # (任务, 孩子, 领取日) 是唯一键：同一天被退回的那行还占着它，重领只能走「重新提交」。
+            return api_error("你已经领取过这个任务", 409)
         return jsonify({"assignment_id": cursor.lastrowid, **state_payload(conn, user)}), 201
 
 
@@ -3409,9 +3403,16 @@ def approve_task(assignment_id: int):
             """,
             (assignment_id,),
         ).fetchone()
-        if assignment is None or assignment["status"] != "submitted":
+        if assignment is None:
             return api_error("待审核的任务提交不存在", 404)
         now = now_iso()
+        # 先把状态抢下来再发钱：两次「通过」同时到达时，只有一条 UPDATE 能命中 submitted。
+        reviewed = conn.execute(
+            "UPDATE task_assignments SET status = 'completed', completed_at = ?, reviewer_id = ?, review_note = NULL WHERE id = ? AND status = 'submitted'",
+            (now, user["id"], assignment_id),
+        )
+        if reviewed.rowcount != 1:
+            return api_error("待审核的任务提交不存在", 404)
         reward_coins = adjusted_earn_coins(conn, int(assignment["account_id"]), int(assignment["reward_coins"]))
         conn.execute(
             """
@@ -3427,10 +3428,6 @@ def approve_task(assignment_id: int):
                 now,
             ),
         )
-        conn.execute(
-            "UPDATE task_assignments SET status = 'completed', completed_at = ?, reviewer_id = ?, review_note = NULL WHERE id = ?",
-            (now, user["id"], assignment_id),
-        )
         unlock_achievements(conn, int(assignment["account_id"]))
         return jsonify(state_payload(conn, user))
 
@@ -3442,16 +3439,12 @@ def reject_task(assignment_id: int):
     reason = str(payload.get("reason", "请完成任务后重新提交")).strip()[:200] or "请完成任务后重新提交"
     with connection() as conn:
         user = current_user(conn)
-        assignment = conn.execute(
-            "SELECT id FROM task_assignments WHERE id = ? AND status = 'submitted'",
-            (assignment_id,),
-        ).fetchone()
-        if assignment is None:
-            return api_error("待审核的任务提交不存在", 404)
-        conn.execute(
-            "UPDATE task_assignments SET status = 'rejected', reviewer_id = ?, review_note = ? WHERE id = ?",
+        reviewed = conn.execute(
+            "UPDATE task_assignments SET status = 'rejected', reviewer_id = ?, review_note = ? WHERE id = ? AND status = 'submitted'",
             (user["id"], reason, assignment_id),
         )
+        if reviewed.rowcount != 1:
+            return api_error("待审核的任务提交不存在", 404)
         return jsonify(state_payload(conn, user))
 
 
@@ -3686,6 +3679,13 @@ def approve_request(request_id: int):
                 )
             except ValueError as exc:
                 return api_error(str(exc))
+        # 先占住申请再落账，同一笔申请才不会因为两个管理员同时点「通过」发两次积分。
+        reviewed = conn.execute(
+            "UPDATE point_requests SET status = 'approved', reviewed_at = ?, reviewer_id = ? WHERE id = ? AND status = 'pending'",
+            (now_iso(), user["id"], request_id),
+        )
+        if reviewed.rowcount != 1:
+            return api_error("待审核申请不存在或已经处理", 404)
         conn.execute(
             """
             INSERT INTO records(account_id, title, amount, type, date, time, created_at, item_kind, item_id, source, quantity)
@@ -3705,10 +3705,6 @@ def approve_request(request_id: int):
                 point_request["quantity"] or 0,
             ),
         )
-        conn.execute(
-            "UPDATE point_requests SET status = 'approved', reviewed_at = ?, reviewer_id = ? WHERE id = ?",
-            (now_iso(), user["id"], request_id),
-        )
         # 审批通过的记录可能落在一个已经闭合的窗口里，所以它和别的记录一样重算自己的项目。
         regrade_after_log(
             conn,
@@ -3727,15 +3723,12 @@ def reject_request(request_id: int):
     reason = str(payload.get("reason", "管理员拒绝了这条申请")).strip()[:200]
     with connection() as conn:
         user = current_user(conn)
-        point_request = conn.execute(
-            "SELECT id FROM point_requests WHERE id = ? AND status = 'pending'", (request_id,)
-        ).fetchone()
-        if point_request is None:
-            return api_error("待审核申请不存在或已经处理", 404)
-        conn.execute(
-            "UPDATE point_requests SET status = 'rejected', reviewed_at = ?, reviewer_id = ?, reject_reason = ? WHERE id = ?",
+        reviewed = conn.execute(
+            "UPDATE point_requests SET status = 'rejected', reviewed_at = ?, reviewer_id = ?, reject_reason = ? WHERE id = ? AND status = 'pending'",
             (now_iso(), user["id"], reason or "管理员拒绝了这条申请", request_id),
         )
+        if reviewed.rowcount != 1:
+            return api_error("待审核申请不存在或已经处理", 404)
         return jsonify(state_payload(conn, user))
 
 
@@ -3756,7 +3749,7 @@ def undo_transaction(record_id: int):
         if removed["source"] in STREAK_SOURCES:
             return api_error("连续奖惩记录不能单独撤销，请用首页的重新核算调整", 409)
         conn.execute("DELETE FROM records WHERE id = ? AND account_id = ?", (record_id, account_id))
-        # 只有新增记录会触发重算：撤销一笔发放是一次性改判，不构成重结整个窗口的理由。
+        # 撤掉结算发的那笔不重算——重算会照水位原样补回；撤掉普通发放才要重算它所在的窗口。
         if removed["source"] not in AUTO_SETTLEMENT_SOURCES:
             regrade_after_log(conn, account_id, removed["item_kind"], removed["item_id"], removed["date"])
         return jsonify(state_payload(conn, user))
@@ -3918,14 +3911,16 @@ def update_item_rule(account_id: int):
         row = conn.execute(f"SELECT * FROM {ITEM_TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
         if row is None:
             return api_error("项目不存在", 404)
-        override_sql = "SELECT * FROM item_rule_overrides WHERE item_kind = ? AND item_id = ? AND account_id = ?"
-        existing = conn.execute(override_sql, (kind, item_id, account_id)).fetchone()
         if request.method == "DELETE":
             conn.execute(
                 "DELETE FROM item_rule_overrides WHERE item_kind = ? AND item_id = ? AND account_id = ?",
                 (kind, item_id, account_id),
             )
             return jsonify(state_payload(conn, user))
+        existing = conn.execute(
+            "SELECT * FROM item_rule_overrides WHERE item_kind = ? AND item_id = ? AND account_id = ?",
+            (kind, item_id, account_id),
+        ).fetchone()
         body = payload
         if str(payload.get("action") or "").lower() == "copy":
             try:
@@ -3942,8 +3937,6 @@ def update_item_rule(account_id: int):
             rule = item_rule_payload(kind, body)
         except ValueError as exc:
             return api_error(str(exc))
-        if rule is None:
-            return api_error("该项目没有计分规则")
         # 像库里的编辑那样锚定：内容没变的复制保留旧锚点，真改了才重新锚定，没有规则的行本来就没锚点可继承。
         base = existing if existing is not None else row
         changed = any(base[column] != value for column, value in rule.items() if column in RULE_ANCHOR_FIELDS)

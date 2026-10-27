@@ -13,7 +13,7 @@ services:
       DATA_DIR: "${DATA_DIR:-/data}"
       DATABASE_PATH: "${DATABASE_PATH:-}"
       PORT: "${PORT:-9696}"
-      # Day boundaries come from the container clock; unset TZ would settle "today" on UTC.
+      # 按天分界看容器时钟，不传 TZ 的话「今天」会按 UTC 早 8 小时翻页。
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
       - ./points_data:/data

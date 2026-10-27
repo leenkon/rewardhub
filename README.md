@@ -4,7 +4,7 @@ RewardHub（中文名“带娃神器”）是一套面向家庭的本地积分�
 
 系统提供家庭监控总控、账户积分表、折合金额、审核中心、积分记录、任务悬赏与验收、冒险等级与成就、积分分析和账号变更日志，并支持成人与孩子头像、本地图标与自定义图片。账号、积分和操作记录保存在本地数据目录中。
 
-当前版本：`0.8.15`
+当前版本：`0.8.16`
 
 ## 更新记录
 
@@ -60,6 +60,6 @@ docker compose up -d
 
 ```bash
 pip install -r requirements.txt
-python app.py            # 默认 http://127.0.0.1:9696，可用 PORT / DATA_DIR 覆盖
+python app.py            # 绑定 0.0.0.0:9696（本机就是 http://127.0.0.1:9696），可用 PORT / DATA_DIR 覆盖
 python -m unittest discover -s tests -q
 ```

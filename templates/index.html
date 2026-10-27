@@ -162,6 +162,7 @@
           <label>截止日期<input name="due_date" type="date"></label>
           <label>任务图标<select name="icon" id="quest-icon"><option value="points.svg">积分</option><option value="delivery.svg">快递</option><option value="homework.svg">作业</option><option value="book.svg">阅读</option><option value="chore.svg">家务</option><option value="bedtime.svg">习惯</option><option value="computer.svg">电脑</option><option value="cleaning.svg">清洁</option><option value="cooking.svg">做饭</option><option value="sport.svg">运动</option><option value="gift.svg">奖励</option><option value="money.svg">积分</option></select><details class="inline-icon-library"><summary>打开内置图标库搜索</summary><input id="quest-icon-search" type="search" placeholder="搜索图标"><div id="quest-icon-groups"></div></details></label>
           <button class="button button-primary" type="submit">发布任务</button>
+          <button class="button button-outline hidden" id="cancel-quest-edit" type="button">取消编辑</button>
         </form>
       </section>
       <div class="quest-board" id="quest-list"></div>

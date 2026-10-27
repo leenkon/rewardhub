@@ -1,6 +1,6 @@
 FROM python:3.12-slim-bookworm
 
-# The release workflow writes the version label; a hardcoded one here would only ever go stale.
+# 镜像版本 label 由发布工作流写入，这里写死一个只会过期。
 LABEL org.opencontainers.image.title="RewardHub"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# The slim base ships no zone database, so a TZ setting would silently fall back to UTC and shift every day boundary by hours.
+# slim 基础镜像不带 zone 数据库，缺了它 TZ 会静默退回 UTC，每一天都按早 8 小时翻页。
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata \

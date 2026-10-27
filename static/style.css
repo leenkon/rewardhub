@@ -612,7 +612,7 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
   .metric-card strong { font-size: 21px; }
   .project-visual-wrap { border-radius: 10px; }
   .login-illustration { width: 132px; height: 132px; }
-  .no-child-panel { align-items: stretch; flex-direction: column; gap: 15px; }
+  .no-child-panel { align-items: stretch; gap: 15px; }
   .log-heading { align-items: flex-start; flex-direction: row; }
   /* 带撤销的行多了一个控件，窄屏装不下名字加四个控件：项目名占满第一行，控件整组排到第二行 */
   .list-row:has(.row-undo) { flex-wrap: wrap; }
@@ -637,7 +637,7 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
   .announcement-popup { top: 68px; right: 12px; left: 12px; width: auto; padding: 16px; }
   .control-center-heading { flex-direction: column; }
   .binding-panel .section-heading { flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .control-center-stats { grid-column: auto; grid-template-columns: repeat(3, 1fr); }
+  .control-center-stats { grid-column: auto; }
   .control-center-stats div { align-items: flex-start; flex-direction: column; padding: 8px 9px; }
   .overview-control-grid { grid-template-columns: 1fr; }
   .overview-control-panel .hero-identity { grid-column: auto; grid-template-columns: 1fr; }
@@ -670,9 +670,9 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
   .overview-control-panel .hero-balance strong { font-size: 32px; }
   .hero-actions, .control-center-actions, .overview-control-panel .control-center-actions, .overview-control-panel .overview-child-actions { grid-template-columns: 1fr; }
   .week-grid { gap: 4px; }
-  .day-item { min-height: 48px; padding: 6px 2px; border-radius: 6px; }
+  .day-item { padding: 6px 2px; border-radius: 6px; }
   .day-item strong { font-size: 13px; }
-  .month-day { min-height: 38px; padding: 4px 3px; font-size: 10px; }
+  .month-day { padding: 4px 3px; font-size: 10px; }
   .item-info strong { max-width: 148px; }
   .list-row.manage-row .item-info strong { max-width: none; }
   /* 手机上名称、绑定标签与三个按钮挤不进一行，让按钮换行而不是压碎项目名 */
