@@ -1414,17 +1414,13 @@ def target_lookback_steps(unit: str, every: int) -> int:
 
 
 def period_label(unit: str, start: str) -> str:
-    """手动结算下拉里的期次名称；季和年挂在「月」锚点上，所以需要自己的文案。"""
+    """期次区间：周只看首尾两天就认得出来，月/季/年的回看会绕回同一个月份，所以必须带年份。"""
     day = date.fromisoformat(start)
-    if unit == "week":
-        return f"{day.month}月{day.day}日那周"
-    if unit == "month":
-        return f"{day.year}年{day.month}月"
-    if unit == "quarter":
-        return f"{day.year}年第{(day.month - 1) // 3 + 1}季度"
-    if unit == "year":
-        return f"{day.year}年"
-    return start
+    if unit == "day":
+        return start
+    end = date.fromisoformat(period_end(unit, start))
+    head = "" if unit == "week" and day.year == end.year else f"{day.year}-"
+    return f"{head}{day.month}-{day.day}~{end.month}-{end.day}"
 
 
 def settled_window_starts(conn: sqlite3.Connection, unit: str) -> set[str]:

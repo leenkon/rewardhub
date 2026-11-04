@@ -1592,10 +1592,13 @@ class PointsManagerApiTests(unittest.TestCase):
                 {"target_unit": unit, "target_every": 1, "rule_set_at": None}, date.today().isoformat()
             )
             self.assertEqual(listed[-1]["start"], floor)
+            # 下拉里念的是这一格的首尾日期，不是「某月某日那周」那种要心算的说法。
+            for row in listed:
+                start, end = (date.fromisoformat(row[key]) for key in ("start", "end"))
+                self.assertIn(f"{start.month}-{start.day}~{end.month}-{end.day}", row["label"])
         self.assertEqual([row["start"] for row in periods[:3]], [self.monday(weeks).isoformat() for weeks in (0, 1, 2)])
         self.assertFalse(periods[0]["closed"])
         self.assertTrue(all(row["closed"] for row in periods[1:]))
-        self.assertIn("那周", periods[1]["label"])
         self.assertEqual(self.client.get("/api/settlements/periods?unit=day").status_code, 400)
         self.assertEqual(self.client.get("/api/settlements/periods?unit=decade").status_code, 400)
         # 「全部周期」 has no window to name, so it offers one catch-up entry and never claims a period is settled.
