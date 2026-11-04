@@ -349,7 +349,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.create_child(username="child", display_name="小朋友")
         earn_id = self.create_item("earn", "完成作业", 10)
         state = self.state()
-        self.assertEqual(state["version"], "0.8.16")
+        self.assertEqual(state["version"], "0.8.17")
         self.assertEqual(state["user"]["avatar"], "adult-male")
         self.assertEqual(state["active_child"]["avatar"], "boy")
 
@@ -2565,9 +2565,10 @@ class PointsManagerApiTests(unittest.TestCase):
                 "streak_unit": "month",
             },
         ).get_json()
-        # The rule starts on the first of a full month about 7 weeks back, so both its own month and one whole week are closed.
+        # The rule starts on the first of a full month a little over a month back, so both its own month and one whole
+        # week are closed while staying inside the 12-week settle lookback.
         month_start = self.app_module.period_shift(
-            "month", 1, self.app_module.period_start("month", self.monday(6).isoformat()), -1
+            "month", 1, self.app_module.period_start("month", self.monday(4).isoformat()), -1
         )
         week_start = self.app_module.full_window_start("week", 1, month_start)
         self.backdate_rule(item["id"], date.fromisoformat(month_start), "deduct")
@@ -2584,7 +2585,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual([row["amount"] for row in records if row["source"] == "over_cap_penalty"], [-4])
         self.assertEqual([row["amount"] for row in records if row["source"] == "deduct_month_streak"], [-3])
 
-        records = self.settle("week", self.monday(6).isoformat(), force=True)["records"]
+        records = self.settle("week", self.monday(4).isoformat(), force=True)["records"]
         self.assertEqual([row["amount"] for row in records if row["source"] == "deduct_month_streak"], [-3])
 
     def test_a_second_settle_walk_cannot_pay_one_window_twice(self):
@@ -2805,6 +2806,110 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertGreaterEqual(widths["3"], self.app_module.xlsx_display_width("10/19"))
         self.assertGreater(heights["4"], heights["5"])
         self.assertEqual(next(sheet.iter(sheet_namespace + "tabColor")).get("rgb"), "FF24A37B")
+
+    def target_status(self, child_id, items, columns):
+        response = self.client.post(
+            "/api/targets/status", json={"columns": columns, "sheets": [{"child": child_id, "items": items}]}
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json()["cells"]
+
+    def test_target_status_uses_each_projects_measure(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        monday = self.monday(1)
+        days = [(monday + timedelta(days=step)).isoformat() for step in range(7)]
+        times_id = self.create_item("earn", "整理房间", 5)
+        quantity_id = self.quantity_item("阅读", points=2, week_target=10, target_measure="quantity")["id"]
+        daily_id = self.client.post(
+            "/api/items/earn", json={"name": "早睡", "points": 2, "icon": "bedtime.svg", "count_days_once": 1}
+        ).get_json()["id"]
+        deduct_id = self.create_item("deduct", "迟到", 3)
+        for item_id, day in ((times_id, days[1]), (times_id, days[1]), (quantity_id, days[2])):
+            payload = {"kind": "earn", "item_id": item_id, "date": day}
+            if item_id == quantity_id:
+                payload["quantity"] = 7
+            self.assertEqual(self.client.post("/api/transactions", json=payload).status_code, 201)
+        for day in (days[0], days[0], days[5]):
+            self.assertEqual(
+                self.client.post("/api/transactions", json={"kind": "earn", "item_id": daily_id, "date": day}).status_code,
+                201,
+            )
+        self.deduct_on(deduct_id, monday + timedelta(days=3))
+
+        keys = [f"earn:{times_id}", f"earn:{quantity_id}", f"earn:{daily_id}", f"deduct:{deduct_id}"]
+        columns = [{"start": day, "end": day} for day in days]
+        cells = self.target_status(child["id"], keys, columns)[str(child["id"])]
+        self.assertEqual(cells[keys[0]], [0, 2, 0, 0, 0, 0, 0])
+        # 数量口径按录入量合计，按天统计口径只数有记录的天数，扣分项目同样按次数。
+        self.assertEqual(cells[keys[1]], [0, 0, 7, 0, 0, 0, 0])
+        self.assertEqual(cells[keys[2]], [1, 0, 0, 0, 0, 1, 0])
+        self.assertEqual(cells[keys[3]], [0, 0, 0, 1, 0, 0, 0])
+
+        # 季度那种 7 天一格由页面切好区间送过来，两端都算进同一格。
+        merged = self.target_status(child["id"], keys, [{"start": days[0], "end": days[6]}])[str(child["id"])]
+        self.assertEqual([merged[key] for key in keys], [[2], [7], [2], [1]])
+        # 结算记录不是完成量，格子只认真正的加/扣分。
+        self.settle()
+        self.assertEqual(self.target_status(child["id"], keys, [{"start": days[0], "end": days[6]}]), {str(child["id"]): merged})
+
+    def test_target_status_checks_the_cells_it_is_given(self):
+        child = self.create_child()
+        item_id = self.create_item("earn", "整理房间", 5)
+        today = date.today().isoformat()
+        columns = [{"start": today, "end": today}]
+        items = [f"earn:{item_id}"]
+        for payload, message in (
+            ({"columns": [], "sheets": [{"child": child["id"], "items": items}]}, "没有要统计的周期格子"),
+            ({"columns": [{"start": "not-a-day", "end": today}], "sheets": [{"child": child["id"], "items": items}]}, "周期格子日期无效"),
+            ({"columns": [{"start": today, "end": (date.today() - timedelta(days=1)).isoformat()}], "sheets": [{"child": child["id"], "items": items}]}, "起止日期反了"),
+            ({"columns": columns, "sheets": [{"child": "abc", "items": items}]}, "孩子标识无效"),
+            ({"columns": columns, "sheets": [{"child": child["id"], "items": ["earn:abc"]}]}, "统计的项目无效"),
+            ({"columns": columns, "sheets": [{"child": child["id"], "items": ["reward:1"]}]}, "项目类型无效"),
+            ({"columns": columns, "sheets": []}, "没有可统计的项目"),
+        ):
+            response = self.client.post("/api/targets/status", json=payload)
+            self.assertEqual(response.status_code, 400, payload)
+            self.assertIn(message, response.get_json()["error"])
+
+        # 删掉的项目不再回格子，整个孩子因此没有可统计的行。
+        missing = self.target_status(child["id"], ["earn:%s" % (item_id + 999)], columns)
+        self.assertEqual(missing, {})
+
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": child["username"], "password": "child123"})
+        self.assertEqual(self.client.post("/api/targets/status", json={"columns": columns, "sheets": [{"child": child["id"], "items": items}]}).status_code, 403)
+
+    def test_target_sheet_export_carries_the_status_marks(self):
+        sheet_namespace = "{%s}" % self.app_module.SHEET_NS
+        payload = {
+            "unit": "week",
+            "date": date.today().isoformat(),
+            "range": "本周 10/19 ~ 10/25",
+            "heads": [["项目", "目标", "一", "二"], ["", "", "10/19", "10/20"]],
+            "sheets": [
+                {
+                    "name": "小明",
+                    "rows": [["阅读", "每周10页", "", "12"], ["早睡", "每天", "✓", ""], ["迟到", "每周≤2次", "✗", ""]],
+                }
+            ],
+        }
+        sheet = ElementTree.fromstring(
+            zipfile.ZipFile(io.BytesIO(self.client.post("/api/targets/export", json=payload).data)).read("xl/worksheets/sheet1.xml")
+        )
+        texts = [element.text for element in sheet.iter(sheet_namespace + "t")]
+        # 三档标记都是页面自己算好的字符串，工作簿原样带上，不再判一遍口径。
+        self.assertIn("12", texts)
+        self.assertEqual([text for text in texts if text in ("✓", "✗")], ["✓", "✗"])
+        # 空档只留边框：勾掉「显示完成情况」时整张表退成纯手写。
+        self.assertEqual(
+            [
+                cell.get("r")
+                for cell in sheet.iter(sheet_namespace + "c")
+                if cell.get("s") == "4" and cell.find(sheet_namespace + "is") is None
+            ],
+            ["C4", "D5", "D6"],
+        )
 
     def test_target_sheet_export_survives_untypeable_characters(self):
         # Item names and nicknames arrive from the browser, and XML 1.0 refuses to carry the control codes a paste can bring with them.

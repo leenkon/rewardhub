@@ -52,7 +52,7 @@ def generated_secret_key() -> str:
 # Compose 转发的是 "${SECRET_KEY:-}"，所以未设置时传来的是空串，而不是根本没有这个变量。
 SECRET_KEY = os.getenv("SECRET_KEY") or generated_secret_key()
 PASSWORD_ITERATIONS = 240_000
-APP_VERSION = "0.8.16"
+APP_VERSION = "0.8.17"
 CHILD_AVATARS = {"boy", "girl"}
 ADULT_AVATARS = {"adult-male", "adult-female"}
 
@@ -142,6 +142,7 @@ ITEM_PERIOD_UNIT = "week"
 ITEM_PERIOD_COUNT = 8
 ITEM_PERIOD_MAX = 31
 TARGET_SHEET_UNITS = ("week", "month", "quarter")
+TARGET_SHEET_KINDS = ("earn", "deduct")
 TARGET_SHEET_MAX_CHILDREN = 12
 TARGET_SHEET_MAX_ROWS = 60
 TARGET_SHEET_MAX_COLUMNS = 64
@@ -1343,12 +1344,17 @@ def reorder_items(conn: sqlite3.Connection, kind: str, ids: list[int]) -> None:
         conn.execute(f"UPDATE {table} SET sort_order = ? WHERE id = ?", (position, moved_id))
 
 
+def item_row(conn: sqlite3.Connection, kind: str, item_id: int) -> sqlite3.Row | None:
+    """按 id 取一条项目行；表名跟着 kind 走，所以这条查询只有这一份。"""
+    return conn.execute(f"SELECT * FROM {ITEM_TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
+
+
 def load_bound_item(
     conn: sqlite3.Connection, kind: str, item_id: int | None, account_id: int, label: str
 ) -> dict[str, Any] | None:
     if item_id is None:
         return None
-    row = conn.execute(f"SELECT * FROM {ITEM_TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
+    row = item_row(conn, kind, item_id)
     if row is None:
         raise ValueError(f"{label}不存在")
     if item_id in excluded_item_ids(conn, kind, account_id):
@@ -1730,7 +1736,7 @@ def resettle_item_windows(
     """把某个项目的这些族从给定日期起回退，返回尾部被清掉的那些单位。"""
     if kind not in ("earn", "deduct") or not item_id:
         return ()
-    row = conn.execute(f"SELECT * FROM {ITEM_TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
+    row = item_row(conn, kind, item_id)
     if row is None:
         return ()
     item = effective_item(conn, kind, row, account_id)
@@ -2471,7 +2477,9 @@ def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) ->
     body_start = len(heads) + 2
     name_width = xlsx_auto_width([row[0] for row in rows], XLSX_NAME_BOUNDS)
     goal_width = xlsx_auto_width([row[1] for row in rows], XLSX_GOAL_BOUNDS)
-    box_width = xlsx_auto_width([cell for head in heads for cell in head[2:]], XLSX_BOX_BOUNDS)
+    box_width = xlsx_auto_width(
+        [cell for head in heads for cell in head[2:]] + [cell for row in rows for cell in row[2:]], XLSX_BOX_BOUNDS
+    )
     lines = [f'<row r="1" ht="22" customHeight="1">{xlsx_text_cell("A1", title, 1)}</row>']
     for index, head in enumerate(heads, start=2):
         cells = "".join(xlsx_text_cell(f"{xlsx_column(column)}{index}", text, 2) for column, text in enumerate(head, start=1))
@@ -2480,10 +2488,15 @@ def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) ->
         index = body_start + offset
         wrapped_lines = max(xlsx_line_count(row[0], name_width), xlsx_line_count(row[1], goal_width))
         height = XLSX_BODY_HEIGHT_BASE + XLSX_BODY_LINE_HEIGHT * (wrapped_lines - 1)
-        boxes = "".join(f'<c r="{xlsx_column(column)}{index}" s="4"/>' for column in range(3, columns + 1))
+        boxes = []
+        for column in range(3, columns + 1):
+            ref = f"{xlsx_column(column)}{index}"
+            # 页面没勾「显示完成情况」时格子仍然只给边框，留出手写的空白。
+            text = row[column - 1] if len(row) > column - 1 else ""
+            boxes.append(xlsx_text_cell(ref, text, 4) if text else f'<c r="{ref}" s="4"/>')
         lines.append(
             f'<row r="{index}" ht="{height:g}" customHeight="1">'
-            f'{xlsx_text_cell(f"A{index}", row[0], 3)}{xlsx_text_cell(f"B{index}", row[1], 4)}{boxes}</row>'
+            f'{xlsx_text_cell(f"A{index}", row[0], 3)}{xlsx_text_cell(f"B{index}", row[1], 4)}{"".join(boxes)}</row>'
         )
     return (
         f"{XML_HEADER}<worksheet xmlns=\"{SHEET_NS}\">"
@@ -2585,12 +2598,55 @@ def target_sheet_request(payload: dict[str, Any]) -> dict[str, Any]:
         rows = []
         for row in (entry.get("rows") or [])[:TARGET_SHEET_MAX_ROWS]:
             if isinstance(row, list) and len(row) >= 2 and str(row[0]).strip():
-                rows.append([str(row[0])[:40], str(row[1])[:24]])
+                cells = [str(cell)[:12] for cell in row[2 : 2 + TARGET_SHEET_MAX_COLUMNS]]
+                rows.append([str(row[0])[:40], str(row[1])[:24], *cells])
         if name and rows:
             sheets.append({"name": name, "rows": rows})
     if not sheets:
         raise ValueError("没有可导出的项目")
     return {"unit": unit, "date": day, "range": str(payload.get("range") or "").strip()[:80], "heads": heads, "sheets": sheets}
+
+
+def target_status_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """目标表的格子由渲染它的那个页面切分（周/月按天、季度按 7 天一格），这里只接受区间并把右端换成开区间。"""
+    raw_columns = payload.get("columns")
+    if not isinstance(raw_columns, list) or not raw_columns or len(raw_columns) > TARGET_SHEET_MAX_COLUMNS:
+        raise ValueError("没有要统计的周期格子")
+    columns: list[tuple[str, str]] = []
+    for entry in raw_columns:
+        start = str(entry.get("start") or "")[:10] if isinstance(entry, dict) else ""
+        end = str(entry.get("end") or "")[:10] if isinstance(entry, dict) else ""
+        try:
+            start_day = date.fromisoformat(start)
+            until_day = date.fromisoformat(end) + timedelta(days=1)
+        except ValueError as exc:
+            raise ValueError("周期格子日期无效") from exc
+        if start_day >= until_day:
+            raise ValueError("周期格子起止日期反了")
+        columns.append((start, until_day.isoformat()))
+    sheets: list[tuple[int, list[tuple[str, int]]]] = []
+    for entry in (payload.get("sheets") or [])[:TARGET_SHEET_MAX_CHILDREN]:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            account_id = int(entry.get("child"))
+        except (TypeError, ValueError):
+            raise ValueError("孩子标识无效")
+        keys: list[tuple[str, int]] = []
+        for ref in (entry.get("items") or [])[:TARGET_SHEET_MAX_ROWS]:
+            kind, _, raw_id = str(ref).partition(":")
+            try:
+                item_id = int(raw_id)
+            except ValueError:
+                raise ValueError("统计的项目无效")
+            if kind not in TARGET_SHEET_KINDS:
+                raise ValueError("统计的项目类型无效")
+            keys.append((kind, item_id))
+        if keys:
+            sheets.append((account_id, keys))
+    if not sheets:
+        raise ValueError("没有可统计的项目")
+    return {"columns": columns, "sheets": sheets, "since": min(start for start, _ in columns)}
 
 
 def request_rows(conn: sqlite3.Connection, user: sqlite3.Row) -> list[dict[str, Any]]:
@@ -3908,7 +3964,7 @@ def update_item_rule(account_id: int):
         user = current_user(conn)
         if conn.execute("SELECT 1 FROM accounts WHERE id = ? AND role = 'child'", (account_id,)).fetchone() is None:
             return api_error("孩子账号不存在", 404)
-        row = conn.execute(f"SELECT * FROM {ITEM_TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
+        row = item_row(conn, kind, item_id)
         if row is None:
             return api_error("项目不存在", 404)
         if request.method == "DELETE":
@@ -4008,6 +4064,34 @@ def export_target_sheet():
         mimetype=XLSX_MIME,
         headers={"Content-Disposition": f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(label)}"},
     )
+
+
+@app.post("/api/targets/status")
+@require_admin
+def target_sheet_status():
+    """按目标表当前切好的格子回每格的完成量：日历怎么分格归渲染它的页面，计量口径仍然只有 completion_count() 一份。"""
+    try:
+        data = target_status_request(request.get_json(silent=True) or {})
+    except ValueError as exc:
+        return api_error(str(exc))
+    cells: dict[str, dict[str, list[int]]] = {}
+    with connection() as conn:
+        for account_id, keys in data["sheets"]:
+            overrides = rule_overrides(conn, account_id)
+            tallies = {kind: completion_counts(conn, account_id, kind, data["since"]) for kind in TARGET_SHEET_KINDS}
+            per_child: dict[str, list[int]] = {}
+            for kind, item_id in keys:
+                row = item_row(conn, kind, item_id)
+                if row is None:
+                    continue
+                item = effective_item(conn, kind, row, account_id, overrides)
+                per_date = tallies[kind].get(item_id, {})
+                per_child[f"{kind}:{item_id}"] = [
+                    completion_count(item, dates_within(per_date, start, until)) for start, until in data["columns"]
+                ]
+            if per_child:
+                cells[str(account_id)] = per_child
+    return jsonify({"cells": cells})
 
 
 @app.get("/api/settlements/periods")

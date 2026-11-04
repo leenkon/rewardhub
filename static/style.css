@@ -523,11 +523,16 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-top: 0; padding: 0; 
 .target-table .sheet-name { max-width: 148px; }
 .target-table .sheet-goal { color: var(--muted); white-space: nowrap; }
 .target-table .weekend { background: var(--green-soft); }
+.target-table .done-earn { color: var(--green-dark); font-weight: 800; white-space: nowrap; }
+.target-table .done-deduct { color: var(--red-dark); font-weight: 800; white-space: nowrap; }
 
 .analytics-controls { position: sticky; top: 66px; z-index: 8; display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin: 0 0 18px; padding: 8px 11px; background: rgba(255, 255, 255, .94); border: 1px solid var(--line); border-radius: var(--radius-sm); backdrop-filter: blur(10px); }
 .analytics-controls label { flex: 0 1 160px; color: var(--muted); font-size: 11px; font-weight: 750; }
 /* 日期输入框若仍按 inline 排，就会贴住说明文字的基线，标签因此飘到下拉框上方。 */
 .analytics-controls select, .analytics-controls input { display: block; min-width: 132px; margin-top: 5px; }
+/* 复选框跟着上面那条规则会被撑成 132px 宽的方块，这里把它收回行内并和文字并排。 */
+.analytics-controls .control-check { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; white-space: nowrap; }
+.analytics-controls .control-check input { flex: 0 0 auto; width: 15px; height: 15px; min-width: 0; margin: 0; display: inline-block; }
 .scope-note { margin-left: 7px; color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .scope-note:empty { display: none; }
 /* Chart.js 的 canvas 自带 300px 固有宽度，会把窄的网格列撑爆。 */

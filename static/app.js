@@ -20,6 +20,7 @@ const appState = {
   analyticsPeriods: 8,
   analyticsKind: "earn",
   settlePeriodUnit: "",
+  targetStatus: null,
 };
 
 let confirmResolver = null;
@@ -373,7 +374,11 @@ function render() {
   updateCashExchangePreview();
   syncAnalyticsScopeOptions();
   syncPeriodCountOptions();
-  if (appState.page === "targets") renderTargetSheets();
+  if (appState.page === "targets") {
+    // 格子量随数据变，每次整体重绘都作废缓存，让它按最新记录重取。
+    appState.targetStatus = null;
+    renderTargetSheets();
+  }
   if (appState.page === "analytics") loadAnalytics().catch((error) => showToast(error.message));
 }
 
@@ -1334,9 +1339,17 @@ function targetColumns(unit, start, end) {
   const cursor = new Date(start);
   const columns = [];
   while (cursor <= end) {
+    const cellStart = localDate(cursor);
     if (unit === "quarter") {
-      // 季度按 7 天一格，从季度首日起算：格顶是第几格，副行给出那格的起始日。
-      columns.push({ top: String(columns.length + 1), sub: `${cursor.getMonth() + 1}/${cursor.getDate()}` });
+      // 季度按 7 天一格，从季度首日起算：格顶是第几格，副行给出那格的起始日；最后一格收到季度末尾。
+      const cellEnd = new Date(cursor);
+      cellEnd.setDate(cellEnd.getDate() + 6);
+      columns.push({
+        top: String(columns.length + 1),
+        sub: `${cursor.getMonth() + 1}/${cursor.getDate()}`,
+        start: cellStart,
+        end: localDate(cellEnd <= end ? cellEnd : end),
+      });
       cursor.setDate(cursor.getDate() + 7);
       continue;
     }
@@ -1345,6 +1358,8 @@ function targetColumns(unit, start, end) {
       top: unit === "week" ? dayNames[weekday].slice(1) : String(cursor.getDate()),
       sub: unit === "week" ? `${cursor.getMonth() + 1}/${cursor.getDate()}` : dayNames[weekday],
       weekend: weekday >= 5,
+      start: cellStart,
+      end: cellStart,
     });
     cursor.setDate(cursor.getDate() + 1);
   }
@@ -1359,7 +1374,7 @@ function targetRows(childId, filter) {
     libraryItems(kind).forEach((base) => {
       if (off.has(Number(base.id))) return;
       const item = effectiveItem(childId, kind, base);
-      rows.push({ kind, item, goal: targetTallyText(item, kind) });
+      rows.push({ kind, key: `${kind}:${item.id}`, item, goal: targetTallyText(item, kind) });
     });
   });
   // 没有规则的项目依然要出现在可打印的表上，只是把「目标」那格留白让人手写。
@@ -1373,24 +1388,83 @@ function targetEmptyText(filter) {
 function targetSheetModel() {
   const filter = document.getElementById("target-filter").value;
   const unit = document.getElementById("target-unit").value;
+  const status = document.getElementById("target-status").checked;
   const input = document.getElementById("target-date");
   if (!input.value) input.value = localDate();
   const { start, end } = periodAnchors(unit, input.value);
   const sheets = (appState.data.children || []).map((child) => ({ child, rows: targetRows(child.id, filter) })).filter((sheet) => sheet.rows.length);
-  return { unit, filter, day: input.value, columns: targetColumns(unit, start, end), range: `${TARGET_CHIP_TEXT[unit]} ${localDate(start)} ~ ${localDate(end)}`, sheets };
+  const columns = targetColumns(unit, start, end);
+  const items = sheets.map((sheet) => `${sheet.child.id}=${sheet.rows.map((row) => row.key).join(",")}`).join("&");
+  return {
+    unit,
+    filter,
+    status,
+    day: input.value,
+    columns,
+    range: `${TARGET_CHIP_TEXT[unit]} ${localDate(start)} ~ ${localDate(end)}`,
+    sheets,
+    key: `${unit}|${input.value}|${items}`,
+  };
+}
+
+function targetCellText(row, count) {
+  // 空档一律留白，让打印出来的人自己填。
+  if (!count) return "";
+  // 三档计量只在这一处判：数量项目写量，「同一天多次只算 1 次」的写勾/叉，其余写次数。
+  if (isQuantityItem(row.item, row.kind) || !Number(row.item.count_days_once)) return String(count);
+  return row.kind === "earn" ? "✓" : "✗";
+}
+
+function targetRowCells(model, sheetId, row) {
+  const cache = model.status && appState.targetStatus?.key === model.key ? appState.targetStatus.cells : {};
+  const counts = ((cache[String(sheetId)] || {})[row.key]) || [];
+  return model.columns.map((_column, index) => targetCellText(row, counts[index]));
+}
+
+function targetStatusPayload(model) {
+  return {
+    columns: model.columns.map((column) => ({ start: column.start, end: column.end })),
+    sheets: model.sheets.map((sheet) => ({ child: sheet.child.id, items: sheet.rows.map((row) => row.key) })),
+  };
+}
+
+let targetStatusRequestId = 0;
+
+async function refreshTargetStatus(model) {
+  if (!model.status) {
+    appState.targetStatus = null;
+    return;
+  }
+  if (appState.targetStatus?.key === model.key) return;
+  const requestId = ++targetStatusRequestId;
+  let cells = {};
+  try {
+    const data = await api("/api/targets/status", { method: "POST", body: JSON.stringify(targetStatusPayload(model)) });
+    cells = data.cells || {};
+  } catch (error) {
+    showToast(error.message);
+  }
+  if (requestId !== targetStatusRequestId) return;
+  // 失败也占住这个 key：否则每次重绘都会重试同一份请求，只会把提示刷屏。
+  appState.targetStatus = { key: model.key, cells };
+  renderTargetSheets();
 }
 
 function renderTargetSheets() {
-  const { columns, range, sheets, filter } = targetSheetModel();
-  document.getElementById("target-sheets").innerHTML = sheets.map((sheet) => `<section class="target-sheet"><div class="sheet-head"><h2>${escapeHtml(sheet.child.display_name)}</h2><p>${range}</p></div><div class="table-scroll"><table class="target-table"><thead><tr><th>项目</th><th>目标</th>${columns
+  const model = targetSheetModel();
+  document.getElementById("target-sheets").innerHTML = model.sheets.map((sheet) => `<section class="target-sheet"><div class="sheet-head"><h2>${escapeHtml(sheet.child.display_name)}</h2><p>${model.range}</p></div><div class="table-scroll"><table class="target-table"><thead><tr><th>项目</th><th>目标</th>${model.columns
     .map((column) => `<th class="${column.weekend ? "weekend" : ""}"><b>${column.top}</b><small>${column.sub}</small></th>`)
     .join("")}</tr></thead><tbody>${sheet.rows
-    .map((row) => `<tr><th class="sheet-name" title="${escapeHtml(ruleSummary(row.item, row.kind))}">${escapeHtml(row.item.name)}</th><td class="sheet-goal">${row.goal}</td>${columns
-      .map((column) => `<td class="${column.weekend ? "weekend" : ""}"></td>`)
-      .join("")}</tr>`)
+    .map((row) => {
+      const texts = targetRowCells(model, sheet.child.id, row);
+      return `<tr><th class="sheet-name" title="${escapeHtml(ruleSummary(row.item, row.kind))}">${escapeHtml(row.item.name)}</th><td class="sheet-goal">${row.goal}</td>${model.columns
+        .map((column, index) => `<td class="${column.weekend ? "weekend" : ""}${texts[index] ? ` done-${row.kind}` : ""}">${texts[index]}</td>`)
+        .join("")}</tr>`;
+    })
     .join("")}</tbody></table></div></section>`).join("");
-  document.getElementById("targets-empty").textContent = targetEmptyText(filter);
-  document.getElementById("targets-empty").classList.toggle("hidden", Boolean(sheets.length));
+  document.getElementById("targets-empty").textContent = targetEmptyText(model.filter);
+  document.getElementById("targets-empty").classList.toggle("hidden", Boolean(model.sheets.length));
+  refreshTargetStatus(model).catch((error) => showToast(error.message));
 }
 
 async function exportTargetSheet() {
@@ -1407,7 +1481,10 @@ async function exportTargetSheet() {
       date: model.day,
       range: model.range,
       heads: [["项目", "目标"].concat(model.columns.map((column) => column.top)), ["", ""].concat(model.columns.map((column) => column.sub))],
-      sheets: model.sheets.map((sheet) => ({ name: sheet.child.display_name, rows: sheet.rows.map((row) => [row.item.name, row.goal]) })),
+      sheets: model.sheets.map((sheet) => ({
+        name: sheet.child.display_name,
+        rows: sheet.rows.map((row) => [row.item.name, row.goal].concat(targetRowCells(model, sheet.child.id, row))),
+      })),
     };
     const response = await fetch("/api/targets/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     if (!response.ok) {
@@ -2223,6 +2300,7 @@ document.getElementById("period-tabs").addEventListener("click", (event) => {
 document.getElementById("target-unit").addEventListener("change", renderTargetSheets);
 document.getElementById("target-date").addEventListener("change", renderTargetSheets);
 document.getElementById("target-filter").addEventListener("change", renderTargetSheets);
+document.getElementById("target-status").addEventListener("change", renderTargetSheets);
 document.getElementById("export-targets").addEventListener("click", exportTargetSheet);
 document.getElementById("analytics-scope").addEventListener("change", (event) => {
   appState.analyticsScope = event.target.value;
