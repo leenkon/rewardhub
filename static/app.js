@@ -216,7 +216,7 @@ async function loadState() {
       return;
     }
     appState.data = await api("/api/state");
-    showApp();
+    showScreen(null);
     navigate(appState.page);
   } catch (error) {
     if (error.status === 401) showLogin();
@@ -233,10 +233,6 @@ function showScreen(activeId) {
   document.getElementById("app-header").classList.toggle("hidden", chromeHidden);
   document.getElementById("app-shell").classList.toggle("hidden", chromeHidden);
   setBottomNavVisible(!chromeHidden);
-}
-
-function showApp() {
-  showScreen(null);
 }
 
 function showLogin() {
