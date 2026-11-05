@@ -13,7 +13,7 @@ TAG_PATTERN = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
 def git_output(*args: str) -> str:
-    # Commit subjects are UTF-8; without an explicit encoding a Windows console decodes them as GBK.
+    # 提交标题是 UTF-8，不显式指定编码时 Windows 控制台会按 GBK 解。
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True, encoding="utf-8").strip()
 
 
@@ -64,7 +64,7 @@ def bump_version(version: str) -> None:
 
 
 def changelog(version: str) -> None:
-    """Open this release's section; a section already written by hand keeps its own entries."""
+    """打开本次版本的段落；已经手写过条目的段落保留原条目，不重复插入。"""
     path = ROOT / "CHANGELOG.md"
     today = datetime.now(timezone.utc).date().isoformat()
     if path.exists():

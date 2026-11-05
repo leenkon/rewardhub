@@ -14,7 +14,7 @@ BOOTSTRAP_DIR = None
 
 
 def setUpModule():
-    """Point the module-level database at a throwaway directory before app is imported."""
+    """在 import app 之前，先把模块级的库指向一个临时目录。"""
     global BOOTSTRAP_DIR
     BOOTSTRAP_DIR = tempfile.TemporaryDirectory()
     os.environ["DATA_DIR"] = BOOTSTRAP_DIR.name
@@ -606,7 +606,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.settle()
         self.assertTrue(self.settlement_rows(item["id"]))
 
-        # Grading is derived from the logs, so wiping a child's history must wipe its water marks too.
+        # 结算是从记录倒推出来的，所以清空孩子的历史必须连结算水位一起清掉。
         self.assertEqual(self.client.post("/api/system/clear").status_code, 200)
         self.assertEqual(self.settlement_rows(item["id"]), [])
         self.assertEqual(self.state()["total_points"], 0)
@@ -640,7 +640,7 @@ class PointsManagerApiTests(unittest.TestCase):
             ).status_code,
             201,
         )
-        # The note is what the day list cannot otherwise tell apart from a bare item log.
+        # 备注是唯一能把这条记录和光板的项目记录分开的线索，日列表单看认不出来。
         self.assertEqual(self.state()["records"][0]["title"], "阅读（读了课外书）")
         yesterday = (date.today() - timedelta(days=1)).isoformat()
         self.assertEqual(
@@ -923,7 +923,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.client.post("/api/auth/select-child", json={"child_id": own["id"]})
         row = self.earn_item_row(item["id"])
         self.assertEqual((row["week_target"], row["week_bonus"], row["cap_period"], row["cap_count"]), (1, 4, "day", 1))
-        # The submit cap is read through the same merge, so it limits only the child that carries it.
+        # 提交上限和规则走同一层合并，所以只拦带上这个上限的孩子。
         for expected in (201, 400):
             self.assertEqual(self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"]}).status_code, expected)
         self.client.post("/api/auth/select-child", json={"child_id": shared["id"]})
@@ -944,7 +944,7 @@ class PointsManagerApiTests(unittest.TestCase):
             self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
             self.grant(item["id"], weeks_back=1, times=3)
 
-        # The last log already re-graded the closed week, so the manual walk has nothing left to pay.
+        # 最后一条记录已当场重结那一整周，手动结算再走一遍就无可发的了。
         self.assertEqual(self.settle()["settlement"]["entries"], 0)
         self.client.post("/api/auth/select-child", json={"child_id": target["id"]})
         self.assertEqual([row["amount"] for row in self.state()["records"] if row["source"] == "weekly_bonus"], [4])
@@ -970,7 +970,7 @@ class PointsManagerApiTests(unittest.TestCase):
         )
 
         rows = self.client.get("/api/analytics?days=7").get_json()["item_periods"]["items"]["earn"]
-        # One row per child, measured by that child's own rule: the override makes the second log points-free.
+        # 一张表一行一个孩子、各按自己生效的规则计量：覆盖规则让第二条记录零分。
         self.assertEqual(
             [
                 (row["account_id"], row["name"], row["measure"], row["total"]["count"], row["total"]["quantity"], row["total"]["coins"])
@@ -1068,7 +1068,7 @@ class PointsManagerApiTests(unittest.TestCase):
         return today - timedelta(days=today.weekday() + weeks_back * 7)
 
     def backdate_rule(self, item_id, day, kind="earn", account_id=None):
-        """Anchor a library rule, or one child's snapshot of it, before the window under test."""
+        """把项目库规则、或某个孩子在它上面的快照，锚到被测窗口的起点之前。"""
         if account_id is None:
             sql, tail = f"UPDATE {kind}_items SET rule_set_at = ? WHERE id = ?", (item_id,)
         else:
@@ -1087,7 +1087,7 @@ class PointsManagerApiTests(unittest.TestCase):
             ).fetchall()
 
     def watermarks(self, item_id, kind="earn"):
-        """Graded windows as (week_start, bonus, penalty), so a mark can be compared before and after a write."""
+        """取已定级的窗口，形如 (week_start, bonus, penalty)，写入前后拿同一份坐标对比。"""
         return [(row["week_start"], row["bonus"], row["penalty"]) for row in self.settlement_rows(item_id, kind)]
 
     def deduct_on(self, item_id, day, times=1):
@@ -1106,7 +1106,7 @@ class PointsManagerApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 201)
 
     def settle(self, unit="week", period=None, force=False):
-        """Windows longer than a day only grade on demand, so tests ask for the period they exercise."""
+        """比一天长的窗口只在被点名时才结算，所以用例要自己指定那一期。"""
         payload = {"unit": unit, "force": force}
         if period:
             payload["period"] = period
@@ -1115,7 +1115,7 @@ class PointsManagerApiTests(unittest.TestCase):
         return response.get_json()
 
     def settle_flags(self, unit="week"):
-        """What the settle picker shows per period: (closed, settled), so tests can follow a window being graded."""
+        """取结算期次下拉每一格的 (closed, settled)，用例据此跟踪窗口的定级过程。"""
         rows = self.client.get(f"/api/settlements/periods?unit={unit}").get_json()["periods"]
         return {row["start"]: (row["closed"], row["settled"]) for row in rows}
 
@@ -1221,7 +1221,7 @@ class PointsManagerApiTests(unittest.TestCase):
             json={"bindings": [{"kind": "earn", "item_id": item["id"], "enabled": False}]},
         )
 
-        # A project unbound from this child earns nothing and costs nothing, even with logs behind it.
+        # 项目从这个孩子解绑后既不加分也不扣分，哪怕历史上还留着记录。
         self.settle()
         self.assertEqual(self.settlement_rows(item["id"]), [])
         self.assertEqual([row for row in self.state()["records"] if row["source"] == "weekly_penalty"], [])
@@ -1244,7 +1244,7 @@ class PointsManagerApiTests(unittest.TestCase):
             json={"name": "早起项目", "points": 5, "icon": "book.svg", "week_target": 5, "week_penalty": 3},
         ).get_json()
         self.grant(item["id"], weeks_back=1)
-        # The rule reaches six weeks back, but the child's only log sits in last week.
+        # 规则回看到六周之前，但这个孩子唯一的记录只在上周。
         self.backdate_rule(item["id"], self.monday(6))
         self.assertEqual(
             [row["date"] for row in self.settle()["records"] if row["source"] == "weekly_penalty"],
@@ -1275,7 +1275,7 @@ class PointsManagerApiTests(unittest.TestCase):
             [5],
         )
 
-        # The approval joins a graded window and rewrites it, so the payout follows the new tally.
+        # 审批通过补进一个已定级的窗口并当场重算，发放跟着新计数走。
         self.assertEqual(self.client.post(f"/api/requests/{request_id}/approve", json={}).status_code, 200)
         self.assertEqual(
             [row["amount"] for row in self.settle()["records"] if row["source"] == "weekly_bonus"],
@@ -1295,8 +1295,8 @@ class PointsManagerApiTests(unittest.TestCase):
         settled = self.settle()
         self.assertEqual([row["amount"] for row in settled["records"] if row["source"] == "weekly_bonus"], [5])
 
-        # Re-anchoring the rule to today means older windows are no longer graded, so a back-dated log there
-        # must leave the already-paid reward alone instead of clearing a window it cannot rebuild.
+        # 把规则的锚点挪到今天，更早的窗口就不再定级，所以补到那些窗口的迟到记录
+        # 只能放着已发的奖金不动，不能清掉一个自己重建不了的窗口。
         self.client.put(
             f"/api/items/earn/{item['id']}",
             json={"name": "改规则项目", "points": 5, "icon": "book.svg", "week_target": 9, "week_bonus": 5},
@@ -1343,7 +1343,7 @@ class PointsManagerApiTests(unittest.TestCase):
         app = self.app_module
         current = app.period_start("quarter", date.today().isoformat())
         previous = app.period_shift("quarter", 1, current, -1)
-        # Quarters reuse the month anchor, so every window starts on January, April, July or October.
+        # 季度沿用月的锚点，所以每一格都从 1、4、7、10 月起算。
         self.assertIn(date.fromisoformat(previous).month, {1, 4, 7, 10})
         self.assertEqual(app.period_end("quarter", previous), (date.fromisoformat(current) - timedelta(days=1)).isoformat())
         item = self.client.post(
@@ -1430,7 +1430,7 @@ class PointsManagerApiTests(unittest.TestCase):
         app = self.app_module
         current = app.period_start("year", date.today().isoformat())
         previous = app.period_shift("year", 1, current, -1)
-        # Years reuse the month anchor, so every window opens on 1 January and shuts on 31 December.
+        # 年份同样沿用月的锚点，所以每一格从 1 月 1 日开到 12 月 31 日。
         self.assertEqual(date.fromisoformat(previous).month, 1)
         self.assertEqual(app.period_end("year", previous), (date.fromisoformat(current) - timedelta(days=1)).isoformat())
         item = self.client.post(
@@ -1452,7 +1452,7 @@ class PointsManagerApiTests(unittest.TestCase):
                 self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"], "date": day}).status_code,
                 201,
             )
-        # Each log re-grades its own item, so the year window is already paid and a week walk cannot touch it.
+        # 每条记录只重算自己那个项目，年档窗口已经结过，按周走一遍碰不到它。
         self.assertEqual(self.settle("week")["settlement"]["entries"], 0)
         settled = self.settle("year")
         self.assertEqual(settled["settlement"]["entries"], 0)
@@ -1481,7 +1481,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.grant(item["id"], weeks_back=2, times=2)
         self.grant(item["id"], weeks_back=1, times=2)
 
-        # Both logs re-graded their own windows, so the walk starts at the period it is asked for and pays nothing twice.
+        # 两条记录各自当场重结了自己的窗口，结算从点名的那期起走，也不会重复发钱。
         settled = self.settle("week", self.monday(1).isoformat())
         self.assertEqual(settled["settlement"]["entries"], 0)
         self.assertEqual(
@@ -1492,19 +1492,19 @@ class PointsManagerApiTests(unittest.TestCase):
             [(row["week_start"], row["bonus"]) for row in self.settlement_rows(item["id"])],
             [(self.monday(2).isoformat(), 5), (self.monday(1).isoformat(), 5)],
         )
-        # The streak chain counts both graded windows, so its payout landed on the week that completes the run.
+        # 连续链统计两个已定级的窗口，所以奖金落在凑满这一串的那一周。
         self.assertEqual(
             [(row["title"], row["amount"]) for row in settled["records"] if row["source"] == "target_streak"],
             [("分期项目 连续 2 期", 20)],
         )
-        # The picker marks both weeks settled so the button asks to regrade rather than pay them again.
+        # 两周都被期次下拉标成已结算，所以按钮要求重新核算而不是再发一遍。
         flags = self.settle_flags()
         self.assertEqual(
             [flags[self.monday(weeks).isoformat()] for weeks in (0, 1, 2)],
             [(False, False), (True, True), (True, True)],
         )
 
-        # A run on an older window pays nothing: settlement walks forward from its newest mark, never back.
+        # 结较早期的窗口一分不发：结算只从自己最新的标记往前推，从不回头。
         settled = self.settle("week", self.monday(2).isoformat())
         self.assertEqual(settled["settlement"]["entries"], 0)
         self.assertEqual(len([row for row in settled["records"] if row["source"] == "weekly_bonus"]), 2)
@@ -1528,7 +1528,7 @@ class PointsManagerApiTests(unittest.TestCase):
 
         for _ in range(2):
             self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"], "date": day})
-        # Reaching target alone pays nothing for a count item; the overshoot from the third log lands in its answer.
+        # 计数项目只达标不发钱，第三条记录超出目标的那笔才进同一条应答。
         answer = self.client.post("/api/transactions", json={"kind": "earn", "item_id": item["id"], "date": day})
         self.assertEqual(
             [
@@ -1559,9 +1559,9 @@ class PointsManagerApiTests(unittest.TestCase):
 
         rule = {"name": "重算项目", "points": 5, "icon": "book.svg", "week_target": 1, "week_bonus": 9}
         self.client.put(f"/api/items/earn/{item['id']}", json=rule)
-        # Editing a rule re-anchors it to today, so the test hands the older window back to settlement.
+        # 改一次规则就把锚点挪到今天，所以用例先把锚点退回更早那期再结算。
         self.backdate_rule(item["id"], self.monday(2))
-        # Both weeks were already graded by their own logs and forward-only still protects them: the new bonus cannot land.
+        # 两周都已被各自记录定过级，只往前推的规则仍然护住它们：新奖金落不进来。
         settled = self.settle("week", self.monday(1).isoformat())
         self.assertEqual(settled["settlement"]["entries"], 0)
         self.assertEqual(
@@ -1569,7 +1569,7 @@ class PointsManagerApiTests(unittest.TestCase):
             [5, 5],
         )
 
-        # A forced run undoes the period and everything after it, so the new bonus lands on the newest window.
+        # 勾了重新核算会把那期及其之后一起清掉，所以新奖金落在最新那期。
         settled = self.settle("week", self.monday(1).isoformat(), force=True)
         self.assertEqual(
             sorted(row["amount"] for row in settled["records"] if row["source"] == "weekly_bonus"),
@@ -1585,7 +1585,7 @@ class PointsManagerApiTests(unittest.TestCase):
         app = self.app_module
         periods = self.client.get("/api/settlements/periods?unit=week").get_json()["periods"]
         self.assertEqual(len(periods), app.SETTLE_LOOKBACK_PERIODS["week"] + 1)
-        # The oldest entry sits exactly on the settlement floor, so the picker can never offer a window nothing grades.
+        # 下拉最老的一格正好压在结算地板上，所以永远不会列出一个没人定级的窗口。
         for unit in ("week", "month", "quarter", "year"):
             listed = self.client.get(f"/api/settlements/periods?unit={unit}").get_json()["periods"]
             floor = app.item_window_floor(
@@ -1605,7 +1605,7 @@ class PointsManagerApiTests(unittest.TestCase):
         all_periods = self.client.get("/api/settlements/periods?unit=all").get_json()["periods"]
         self.assertEqual([(row["start"], row["closed"], row["settled"]) for row in all_periods], [("", True, False)])
 
-        # Day rules settle with the page, an open window is not gradeable, and a regrade needs somewhere to start.
+        # 天档随页面结算、没闭合的窗口不能核算、重新核算得先选一期。
         self.assertEqual(self.client.post("/api/settlements/run", json={"unit": "day"}).status_code, 400)
         self.assertEqual(self.client.post("/api/settlements/run", json={"unit": "week", "period": "not-a-date"}).status_code, 400)
         open_week = self.client.post("/api/settlements/run", json={"unit": "week", "period": self.monday(0).isoformat()})
@@ -1669,7 +1669,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertIsNotNone(item["rule_set_at"])
         self.grant(item["id"], weeks_back=1, times=2)
 
-        # The rule starts today, so last week's back-dated logs are history without a rule, not a missed target.
+        # 规则今天才起算，上周补进来的记录属于没有规则的历史，不算未达标。
         self.assertEqual(self.settle("week", period=self.monday(1).isoformat())["settlement"]["entries"], 0)
         self.assertEqual(self.settlement_rows(item["id"]), [])
         self.client.delete(f"/api/items/earn/{item['id']}")
@@ -1685,7 +1685,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.grant(item["id"], weeks_back=1, times=3)
         self.backdate_rule(item["id"], self.monday(2) + timedelta(days=2))
 
-        # The rule joined a week already under way, so that week is neither rewarded nor fined; the next full one is graded.
+        # 规则定在半途的那一周既不发奖也不罚分，下一整个星期才开始定级。
         self.settle("all")
         self.assertEqual(
             [(row["week_start"], row["bonus"], row["penalty"]) for row in self.settlement_rows(item["id"])],
@@ -1708,13 +1708,13 @@ class PointsManagerApiTests(unittest.TestCase):
         self.grant(gone["id"], weeks_back=1, times=3)
         self.client.delete(f"/api/items/earn/{gone['id']}")
 
-        # Both projects settled with their own logs, so the walk is left with nothing to hand out.
+        # 两个项目都在各自记录落账时结清了，再走一遍无可发。
         self.assertEqual(self.settle("week", period=self.monday(1).isoformat())["settlement"]["entries"], 0)
         self.assertEqual(
             [(row["week_start"], row["bonus"]) for row in self.settlement_rows(kept["id"])],
             [(self.monday(1).isoformat(), 3)],
         )
-        # Deleting a project leaves its graded window alone: the coins its logs already paid stay paid.
+        # 删除项目不动它已定级的窗口：记录已经发出去的积分仍然算数。
         self.assertEqual(
             [(row["week_start"], row["bonus"]) for row in self.settlement_rows(gone["id"])],
             [(self.monday(1).isoformat(), 3)],
@@ -1774,7 +1774,7 @@ class PointsManagerApiTests(unittest.TestCase):
             day = (date.today() - timedelta(days=days_back)).isoformat()
             self.assertEqual(self.submit_earn(item["id"], date=day).status_code, 201)
 
-        # Four straight days pay once at the third day; the fourth day starts the next run.
+        # 连着四天只在第三天发一次，第四天另起一串。
         self.assertEqual(
             [(row["title"], row["amount"], row["date"]) for row in self.streak_records("target_streak")],
             [("每日连续 连续 3 期", 6, (date.today() - timedelta(days=2)).isoformat())],
@@ -1901,7 +1901,7 @@ class PointsManagerApiTests(unittest.TestCase):
                 "target_measure": "quantity",
             },
         ).get_json()
-        # A deduct target counts submissions: no quantity measure and no shortfall reward.
+        # 扣分项目的目标按提交次数计：不取数量口径，也就不存在按缺口补发的那一层。
         self.assertEqual(item["week_penalty"], 0)
         self.assertEqual(item["target_measure"], "count")
         self.assertEqual(item["count_days_once"], 0)
@@ -1924,7 +1924,7 @@ class PointsManagerApiTests(unittest.TestCase):
         )
         self.assertEqual(settled["total_points"], -9)
 
-        # A later entry inside a graded window rewrites it on the spot, so the charge follows the new tally.
+        # 已定级的窗口里再补一条会当场重算，扣的分跟着新计数走。
         self.deduct_on(item["id"], self.monday(1) + timedelta(days=3))
         settled = self.settle()
         charges = [row for row in settled["records"] if row["source"] == "over_cap_penalty"]
@@ -1962,7 +1962,7 @@ class PointsManagerApiTests(unittest.TestCase):
         for days_back in (3, 2, 1):
             self.assertEqual(self.submit_earn(earn["id"], date=(date.today() - timedelta(days=days_back)).isoformat()).status_code, 201)
 
-        # Day rules settle with the page load, so a deleted streak record would be re-paid inside the same undo request.
+        # 天档随页面加载结算，所以连续记录一旦被删，同一次撤销请求里就会被补发回来。
         payouts = self.streak_records("target_streak")
         self.assertEqual([row["amount"] for row in payouts], [4])
         refused = self.client.post(f"/api/transactions/{payouts[0]['id']}/undo")
@@ -2004,7 +2004,7 @@ class PointsManagerApiTests(unittest.TestCase):
         bonuses = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
         self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("阅读 3/2", 4)])
 
-        # The window's audit row survives, so the revoked payout is not re-paid by the next walk.
+        # 那一期的水位行还在，所以撤销掉的发放不会被下一次结算补发。
         self.assertEqual(self.client.post(f"/api/transactions/{bonuses[0]['id']}/undo").status_code, 200)
         self.assertEqual(len(self.settlement_rows(item["id"])), 1)
         settled = self.settle("all")
@@ -2061,7 +2061,7 @@ class PointsManagerApiTests(unittest.TestCase):
         )
 
         self.backdate_rule(item["id"], self.monday(2))
-        # One grant in each of the last two weeks misses the two-per-week target both times, so only the fine chain runs.
+        # 前两周各只给一次，两次都没到每周两次的目标，所以只有罚分链在跑。
         self.grant(item["id"], weeks_back=2)
         self.grant(item["id"], weeks_back=1)
         self.settle()
@@ -2077,7 +2077,7 @@ class PointsManagerApiTests(unittest.TestCase):
             json={"name": "老规则", "points": 5, "icon": "book.svg", "week_target": 2, "streak_weeks": 2, "streak_bonus": 5},
         ).get_json()["id"]
         with type(self).connection() as conn:
-            # An install from before the fine had its own columns stored it as a negative award.
+            # 罚分单列之前的老安装把它存成负数加分，升级时要搬进罚分列。
             conn.execute("UPDATE earn_items SET streak_bonus = -5 WHERE id = ?", (item_id,))
             self.app_module.ensure_item_schema(conn)
             row = conn.execute(
@@ -2092,7 +2092,7 @@ class PointsManagerApiTests(unittest.TestCase):
             "/api/items/earn", json={"name": "重新出现", "points": 3, "icon": "book.svg"}
         ).get_json()["id"]
         with type(self).connection() as conn:
-            # An install from when items had an on/off switch stored it per item; dropping the column brings hidden items back.
+            # 项目带开关列那阵子的老安装把开关存在每个项目上，删掉这列就等于把藏起来的项目放回来。
             conn.execute("ALTER TABLE earn_items ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
             conn.execute("ALTER TABLE earn_items ADD COLUMN active_from TEXT")
             conn.execute("UPDATE earn_items SET active = 0 WHERE id = ?", (item_id,))
@@ -2181,18 +2181,18 @@ class PointsManagerApiTests(unittest.TestCase):
 
         self.backdate_rule(item["id"], self.monday(1))
         self.assertEqual(self.submit_earn(item["id"], date=(self.monday(1) + timedelta(days=1)).isoformat(), quantity=7).status_code, 201)
-        # Below the 10-item target nothing pays, so the closed window stays open for later logs.
+        # 没到 10 个的目标就一分不发，那一整周因此留着等后来的记录。
         self.assertEqual([row for row in self.settle()["records"] if row["source"] == "weekly_bonus"], [])
         self.assertEqual(self.submit_earn(item["id"], date=(self.monday(1) + timedelta(days=3)).isoformat(), quantity=20).status_code, 201)
 
-        # Logging is points-free; the 27 items pay the 3 completion points plus 2 per full 5 of the 17 above target.
+        # 录入本身零分；27 个结出 3 分完成分，另按超出目标的 17 个每满 5 个加 2 分。
         self.assertEqual([(row["amount"], row["quantity"]) for row in self.earn_logs()], [(0, 20), (0, 7)])
         bonuses = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
         self.assertEqual([(row["title"], row["amount"]) for row in bonuses], [("计算题 27/10", 9)])
         self.assertEqual(self.state()["total_points"], 9)
         self.assertEqual(len(self.state()["records"]), len(bonuses) + 2)
 
-        # Points-free logs still count as completions, but only the settled bonus carries coins.
+        # 零分记录照样算完成，但只有结算出来的奖金才带积分。
         periods = self.client.get("/api/analytics?days=30").get_json()["item_periods"]
         earned = next(row for row in periods["items"]["earn"] if row["name"] == "计算题")
         self.assertEqual((earned["measure"], earned["total"]["count"], earned["total"]["quantity"]), ("quantity", 2, 27))
@@ -2217,7 +2217,7 @@ class PointsManagerApiTests(unittest.TestCase):
             day = (self.monday(weeks_back) + timedelta(days=1)).isoformat()
             self.assertEqual(self.submit_earn(item["id"], date=day, quantity=quantity).status_code, 201)
 
-        # Each closed window pays the 2 completion points; only the count above the target scores, so 3 adds nothing and 6 adds 2.
+        # 每个闭合窗口发 2 分完成分，只有超出目标的数量才计分，所以 3 个不加、6 个加 2。
         bonuses = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
         self.assertEqual(
             [(row["title"], row["amount"]) for row in bonuses],
@@ -2305,10 +2305,10 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual((row["title"], row["amount"]), ("补录：补录扣分", -4))
         self.assertEqual(removed.get_json()["total_points"], 1)
 
-        # Without a project the hand-written score still applies.
+        # 不选项目时，手填的分照样生效。
         free = self.manual_entry(name="线下补偿", points=8, date=day)
         self.assertEqual(self.manual_logs(free.get_json())[0]["title"], "补积分：线下补偿")
-        # A log describes something that already happened, so dates past today are refused.
+        # 记录写的是已经发生的事，所以晚于今天的日期会被拒。
         future = self.manual_entry(item_kind="earn", item_id=earn["id"], date=(date.today() + timedelta(days=1)).isoformat())
         self.assertEqual(future.status_code, 400)
         self.assertIn("发生日期不能晚于今天", future.get_json()["error"])
@@ -2350,7 +2350,7 @@ class PointsManagerApiTests(unittest.TestCase):
         ).get_json()
         self.backdate_rule(item["id"], self.monday(1))
         self.grant(item["id"], weeks_back=1)
-        # The log graded its own closed window on the way in, so one miss is already fined.
+        # 记录落账时就重算了自己那个闭合窗口，所以这一次未达标已经罚过了。
         settled = self.settle()
         self.assertEqual(settled["settlement"]["entries"], 0)
         self.assertEqual(
@@ -2568,8 +2568,8 @@ class PointsManagerApiTests(unittest.TestCase):
                 "streak_unit": "month",
             },
         ).get_json()
-        # The rule starts on the first of a full month a little over a month back, so both its own month and one whole
-        # week are closed while staying inside the 12-week settle lookback.
+        # 规则起算于一个多月前那个完整月份的 1 号，于是本月和整整一周都已闭合，
+        # 同时都还在月档 12 期的回看范围之内。
         month_start = self.app_module.period_shift(
             "month", 1, self.app_module.period_start("month", self.monday(4).isoformat()), -1
         )
@@ -2583,7 +2583,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual([row["amount"] for row in settled], [-4])
         self.assertEqual([row["amount"] for row in self.streak_records("deduct_month_streak")], [-3])
 
-        # A forced regrade of one unit must not swallow the window another unit already paid.
+        # 单个档位重新核算，不能把另一个档位已发的窗口一起吃掉。
         records = self.settle("month", log_day.replace(day=1).isoformat(), force=True)["records"]
         self.assertEqual([row["amount"] for row in records if row["source"] == "over_cap_penalty"], [-4])
         self.assertEqual([row["amount"] for row in records if row["source"] == "deduct_month_streak"], [-3])
@@ -2603,7 +2603,7 @@ class PointsManagerApiTests(unittest.TestCase):
         paid = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
         self.assertEqual([(row["title"], row["amount"]) for row in paid], [("阅读 3/2", 4)])
 
-        # A lost watermark used to be enough to pay the same window again; the record key now blocks it.
+        # 以前水位行丢了就足以把同一期再发一遍，现在由记录上的唯一索引拦住。
         with type(self).connection() as conn:
             conn.execute("DELETE FROM weekly_settlements WHERE item_kind = 'earn' AND item_id = ?", (item["id"],))
         self.settle()
@@ -2711,7 +2711,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(daily["unit"], "day")
         self.assertEqual(daily["periods"][-1]["label"], today)
         rows = [item for item in daily["items"]["earn"] if item["name"] == "完成作业"]
-        # The table is one row per child, so the same project never merges the two children's coins.
+        # 这张表一行一个孩子，同一个项目不会把两个孩子的积分并在一起。
         self.assertEqual(
             [(row["account_id"], row["measure"], row["total"]["count"], row["total"]["coins"]) for row in rows],
             [(first["id"], "count", 1, 10), (second["id"], "count", 1, 10)],
@@ -2790,7 +2790,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/targets/export", json=payload).status_code, 403)
 
     def test_target_sheet_columns_fit_their_content(self):
-        # Column widths and row heights used to be hardcoded, so a long item name wrapped into a row too short to show it.
+        # 列宽行高原先写死，长项目名折行进一行显示不下，现在一律按内容算。
         sheet_namespace = "{%s}" % self.app_module.SHEET_NS
         long_name = "阅读课外书" * 8
         payload = {
@@ -2915,7 +2915,7 @@ class PointsManagerApiTests(unittest.TestCase):
         )
 
     def test_target_sheet_export_survives_untypeable_characters(self):
-        # Item names and nicknames arrive from the browser, and XML 1.0 refuses to carry the control codes a paste can bring with them.
+        # 项目名和昵称来自浏览器，而 XML 1.0 不允许携带粘贴一起带进来的控制字符。
         payload = {
             "unit": "week",
             "date": date.today().isoformat(),
@@ -2946,7 +2946,7 @@ class PointsManagerApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400, payload)
             error = response.get_json()["error"]
             self.assertIn(hint, error)
-            # The interpreter's own wording must never reach a child's screen.
+            # 解释器自己的报错原文绝不能出现在孩子的屏幕上。
             self.assertNotIn("int()", error)
 
     def test_oversized_request_still_answers_in_json(self):
@@ -2955,7 +2955,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(response.get_json()["error"], "提交内容过大，请减少后重试")
 
     def test_session_key_is_created_once_and_reused(self):
-        # A published placeholder key would let anyone forge an admin cookie, so an unset key has to be unpredictable and stable.
+        # 写死在源码里的密钥谁都能签出管理员 cookie，所以没配置时要随机生成并落盘复用。
         module = self.app_module
         first = module.generated_secret_key()
         self.assertEqual(len(first), 64)
@@ -3064,7 +3064,7 @@ class ItemLibraryMigrationTests(unittest.TestCase):
         rows = [
             ("00:01", "target_streak"), ("00:02", "target_streak"), ("00:03", "target_streak"),
             ("00:04", "weekly_bonus"), ("00:05", "weekly_bonus"),
-            # Ordinary logs repeat an item on the same day on purpose, so they stay outside the guard.
+            # 普通记录本来就允许同一项目同一天好几笔，所以不进这个唯一索引。
             ("00:06", "earn"), ("00:07", "earn"),
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -3106,7 +3106,7 @@ class ItemLibraryMigrationTests(unittest.TestCase):
                     "id INTEGER PRIMARY KEY, account_id INTEGER, item_kind TEXT, "
                     "item_id INTEGER, date TEXT, source TEXT)"
                 )
-                # An older release built the guard without the fine's source; IF NOT EXISTS alone would leave it unguarded.
+                # 老版本建的唯一索引不含罚分那个 source，光靠 IF NOT EXISTS 会让它继续漏拦。
                 conn.execute(
                     "CREATE UNIQUE INDEX records_settlement_once ON records(account_id, item_kind, item_id, date, source)"
                     " WHERE source IN ('weekly_bonus', 'target_streak')"

@@ -114,7 +114,8 @@ def valid_project_icon(icon: str | None) -> bool:
     return icon.startswith("emoji:") and icon[6:] in BUILTIN_ICON_KEYS
 
 ITEM_TABLES = {"earn": "earn_items", "deduct": "deduct_items", "reward": "rewards"}
-SCORING_TABLES = ("earn_items", "deduct_items")
+ITEM_KINDS = ("earn", "deduct")
+SCORING_TABLES = tuple(f"{kind}_items" for kind in ITEM_KINDS)
 CAP_PERIOD_LABELS = {
     "day": "每天",
     "week": "每周",
@@ -142,7 +143,6 @@ ITEM_PERIOD_UNIT = "week"
 ITEM_PERIOD_COUNT = 8
 ITEM_PERIOD_MAX = 31
 TARGET_SHEET_UNITS = ("week", "month", "quarter")
-TARGET_SHEET_KINDS = ("earn", "deduct")
 TARGET_SHEET_MAX_CHILDREN = 12
 TARGET_SHEET_MAX_ROWS = 60
 TARGET_SHEET_MAX_COLUMNS = 64
@@ -1309,7 +1309,7 @@ def binding_state(conn: sqlite3.Connection, child_ids: list[int]) -> dict[str, d
 
 def rule_override_state(conn: sqlite3.Connection, child_ids: list[int]) -> dict[str, dict[str, dict[str, Any]]]:
     """每个孩子自带规则快照的那些项目；孩子或项目不在这里，就跟随库里的规则。"""
-    state = {str(child_id): {kind: {} for kind in ("earn", "deduct")} for child_id in child_ids}
+    state = {str(child_id): {kind: {} for kind in ITEM_KINDS} for child_id in child_ids}
     for row in conn.execute("SELECT * FROM item_rule_overrides"):
         bucket = state.get(str(int(row["account_id"])))
         if bucket is not None and row["item_kind"] in bucket:
@@ -1607,7 +1607,7 @@ def rule_items(conn: sqlite3.Connection, account_id: int | None = None) -> list[
     """某个孩子名下、生效的目标窗口结束时会被结算的项目；不指定孩子时，就是库自己的规则筛出来的项目。"""
     return [
         (kind, item)
-        for kind in ("earn", "deduct")
+        for kind in ITEM_KINDS
         for item in scored_items(conn, kind, account_id)
         if target_rule_active(item, kind)
     ]
@@ -1730,7 +1730,7 @@ def resettle_item_windows(
     unit: str | None = None,
 ) -> tuple[str, ...]:
     """把某个项目的这些族从给定日期起回退，返回尾部被清掉的那些单位。"""
-    if kind not in ("earn", "deduct") or not item_id:
+    if kind not in ITEM_KINDS or not item_id:
         return ()
     row = item_row(conn, kind, item_id)
     if row is None:
@@ -2200,7 +2200,7 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
     where = f"account_id IN ({marks}) AND date >= ? AND date <= ?"
     params: list[Any] = [*account_ids, periods[0]["start"], periods[-1]["end"]]
     items_of: dict[str, list[dict[str, Any]]] = {}
-    for kind in ("earn", "deduct"):
+    for kind in ITEM_KINDS:
         # 只有加分项目带数量口径；扣分项目一律按次数统计。
         measure = "target_measure" if kind == "earn" else "NULL AS target_measure"
         items_of[kind] = [
@@ -2240,7 +2240,7 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
             tally = entry["cells"][position] = {"count": 0, "quantity": 0, "coins": 0, "payout": 0, "detail": []}
         return tally
 
-    for kind in ("earn", "deduct"):
+    for kind in ITEM_KINDS:
         for row in conn.execute(
             f"SELECT account_id, item_id, title, date, amount, quantity FROM records WHERE {COMPLETION_FILTERS[kind]} AND {where}",
             params,
@@ -2578,8 +2578,8 @@ def target_sheet_request(payload: dict[str, Any]) -> dict[str, Any]:
     day = str(payload.get("date") or "").strip()
     try:
         date.fromisoformat(day)
-    except ValueError:
-        raise ValueError("导出日期无效")
+    except ValueError as exc:
+        raise ValueError("导出日期无效") from exc
     raw_heads = payload.get("heads")
     if not isinstance(raw_heads, list) or len(raw_heads) != 2:
         raise ValueError("导出表头需要两行")
@@ -2626,16 +2626,16 @@ def target_status_request(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         try:
             account_id = int(entry.get("child"))
-        except (TypeError, ValueError):
-            raise ValueError("孩子标识无效")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("孩子标识无效") from exc
         keys: list[tuple[str, int]] = []
         for ref in (entry.get("items") or [])[:TARGET_SHEET_MAX_ROWS]:
             kind, _, raw_id = str(ref).partition(":")
             try:
                 item_id = int(raw_id)
-            except ValueError:
-                raise ValueError("统计的项目无效")
-            if kind not in TARGET_SHEET_KINDS:
+            except ValueError as exc:
+                raise ValueError("统计的项目无效") from exc
+            if kind not in ITEM_KINDS:
                 raise ValueError("统计的项目类型无效")
             keys.append((kind, item_id))
         if keys:
@@ -3500,17 +3500,25 @@ def reject_task(assignment_id: int):
         return jsonify(state_payload(conn, user))
 
 
+def announcement_values(payload: dict[str, Any], audience: str) -> tuple[str, str, str]:
+    """公告那三列的新建与编辑共用一套校验；范围默认值两个入口不一样，所以由调用方传进来。"""
+    title = str(payload.get("title", "")).strip()[:80]
+    content = str(payload.get("content", "")).strip()[:500]
+    if not title or not content:
+        raise ValueError("公告标题和内容不能为空")
+    if audience not in {"all", "children"}:
+        raise ValueError("公告范围无效")
+    return title, content, audience
+
+
 @app.post("/api/announcements")
 @require_admin
 def create_announcement():
     payload = request.get_json(silent=True) or {}
-    title = str(payload.get("title", "")).strip()[:80]
-    content = str(payload.get("content", "")).strip()[:500]
-    audience = str(payload.get("audience", "all")).lower()
-    if not title or not content:
-        return api_error("公告标题和内容不能为空")
-    if audience not in {"all", "children"}:
-        return api_error("公告范围无效")
+    try:
+        title, content, audience = announcement_values(payload, str(payload.get("audience", "all")).lower())
+    except ValueError as exc:
+        return api_error(str(exc))
     with connection() as conn:
         user = current_user(conn)
         now = now_iso()
@@ -3539,13 +3547,10 @@ def announcement_detail(announcement_id: int):
             conn.execute("UPDATE announcements SET is_active = 0 WHERE id = ?", (announcement_id,))
             return jsonify({"deleted": True, **state_payload(conn, user)})
         payload = request.get_json(silent=True) or {}
-        title = str(payload.get("title", "")).strip()[:80]
-        content = str(payload.get("content", "")).strip()[:500]
-        audience = str(payload.get("audience", existing["audience"])).lower()
-        if not title or not content:
-            return api_error("公告标题和内容不能为空")
-        if audience not in {"all", "children"}:
-            return api_error("公告范围无效")
+        try:
+            title, content, audience = announcement_values(payload, str(payload.get("audience", existing["audience"])).lower())
+        except ValueError as exc:
+            return api_error(str(exc))
         conn.execute(
             "UPDATE announcements SET title = ?, content = ?, audience = ?, updated_at = ? WHERE id = ?",
             (title, content, audience, now_iso(), announcement_id),
@@ -3623,7 +3628,7 @@ def create_transaction():
                 transaction_type = "expense"
             elif kind == "manual":
                 manual_kind = str(payload.get("item_kind", "")).lower()
-                if manual_kind in ("earn", "deduct"):
+                if manual_kind in ITEM_KINDS:
                     item = load_bound_item(conn, manual_kind, item_id, account_id, "补录项目")
                     if item is None:
                         raise ValueError("请选择补录项目")
@@ -3807,23 +3812,27 @@ def undo_transaction(record_id: int):
         return jsonify(state_payload(conn, user))
 
 
+def item_form_values(kind: str, payload: dict[str, Any], icon: str) -> tuple[str, int, dict[str, Any] | None]:
+    """项目表单里新建和编辑共用的一套校验；不合法就抛 ValueError，由入口转成提示。图标各入口的默认值不同，所以由调用方算好传进来。"""
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise ValueError("项目名称不能为空")
+    if not valid_project_icon(icon):
+        raise ValueError("项目图片类型无效")
+    return name, positive_int(payload.get("points")), item_rule_payload(kind, payload)
+
+
 @app.post("/api/items/<kind>")
 @require_admin
 def create_item(kind: str):
     if kind not in ITEM_TABLES:
         return api_error("不支持的项目类型", 404)
     payload = request.get_json(silent=True) or {}
-    name = str(payload.get("name", "")).strip()
     icon = str(payload.get("icon") or ITEM_DEFAULT_ICONS[kind])
     try:
-        points = positive_int(payload.get("points"))
-        rule = item_rule_payload(kind, payload)
+        name, points, rule = item_form_values(kind, payload, icon)
     except ValueError as exc:
         return api_error(str(exc))
-    if not name:
-        return api_error("项目名称不能为空")
-    if not valid_project_icon(icon):
-        return api_error("项目图片类型无效")
     with connection() as conn:
         table = ITEM_TABLES[kind]
         if has_duplicate_item_name(conn, table, name):
@@ -3862,15 +3871,9 @@ def item_detail(kind: str, item_id: int):
             # 水位标记和发放记录都保留：删除项目不该改写已经判定过的历史。
             return jsonify({"deleted": True})
         payload = request.get_json(silent=True) or {}
-        name = str(payload.get("name", "")).strip()
         icon = str(payload.get("icon") or existing["icon"] or ITEM_DEFAULT_ICONS[kind])
-        if not name:
-            return api_error("项目名称不能为空")
-        if not valid_project_icon(icon):
-            return api_error("项目图片类型无效")
         try:
-            points = positive_int(payload.get("points"))
-            rule = item_rule_payload(kind, payload)
+            name, points, rule = item_form_values(kind, payload, icon)
         except ValueError as exc:
             return api_error(str(exc))
         if has_duplicate_item_name(conn, table, name, item_id):
@@ -3950,7 +3953,7 @@ def update_item_rule(account_id: int):
     """某个孩子在单个项目上的规则快照：直接写、抄另一个孩子的，或者退回库里的规则。"""
     payload = request.get_json(silent=True) or {}
     kind = str(payload.get("kind") or "")
-    if kind not in ("earn", "deduct"):
+    if kind not in ITEM_KINDS:
         return api_error("不支持的项目类型", 404)
     try:
         item_id = positive_int(payload.get("item_id"), "项目")
@@ -4074,7 +4077,7 @@ def target_sheet_status():
     with connection() as conn:
         for account_id, keys in data["sheets"]:
             overrides = rule_overrides(conn, account_id)
-            tallies = {kind: completion_counts(conn, account_id, kind, data["since"]) for kind in TARGET_SHEET_KINDS}
+            tallies = {kind: completion_counts(conn, account_id, kind, data["since"]) for kind in ITEM_KINDS}
             per_child: dict[str, list[int]] = {}
             for kind, item_id in keys:
                 row = item_row(conn, kind, item_id)

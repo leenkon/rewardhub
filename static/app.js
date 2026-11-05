@@ -171,12 +171,13 @@ function pointsText(points, includeMoney = true) {
 
 function updateCurrencyUi() {
   const rate = pointsRate();
+  const label = `${rate.toLocaleString("zh-CN")} 积分 = 1 元`;
   const rule = document.getElementById("currency-rule");
-  if (rule) rule.textContent = `${rate.toLocaleString("zh-CN")} 积分 = 1 元`;
+  if (rule) rule.textContent = label;
   const input = document.querySelector("#currency-form input[name='points_per_yuan']");
   if (input && document.activeElement !== input) input.value = rate;
   const cashRate = document.getElementById("cash-exchange-rate");
-  if (cashRate) cashRate.textContent = `${rate.toLocaleString("zh-CN")} 积分 = 1 元`;
+  if (cashRate) cashRate.textContent = label;
 }
 
 function levelBenefitText() {
@@ -223,13 +224,19 @@ async function loadState() {
   }
 }
 
+// 三个整屏视图互斥；activeId 传 null 表示回到应用本体（顶栏 + 外壳 + 底部导航）。
+function showScreen(activeId) {
+  ["login-screen", "setup-screen", "child-register-screen"].forEach((id) => {
+    document.getElementById(id).classList.toggle("hidden", id !== activeId);
+  });
+  const chromeHidden = activeId !== null;
+  document.getElementById("app-header").classList.toggle("hidden", chromeHidden);
+  document.getElementById("app-shell").classList.toggle("hidden", chromeHidden);
+  setBottomNavVisible(!chromeHidden);
+}
+
 function showApp() {
-  document.getElementById("login-screen").classList.add("hidden");
-  document.getElementById("setup-screen").classList.add("hidden");
-  document.getElementById("child-register-screen").classList.add("hidden");
-  document.getElementById("app-header").classList.remove("hidden");
-  document.getElementById("app-shell").classList.remove("hidden");
-  setBottomNavVisible(true);
+  showScreen(null);
 }
 
 function showLogin() {
@@ -237,34 +244,19 @@ function showLogin() {
   appState.analytics = null;
   appState.page = "home";
   closeModal();
-  document.getElementById("login-screen").classList.remove("hidden");
-  document.getElementById("setup-screen").classList.add("hidden");
-  document.getElementById("child-register-screen").classList.add("hidden");
-  document.getElementById("app-header").classList.add("hidden");
-  document.getElementById("app-shell").classList.add("hidden");
-  setBottomNavVisible(false);
+  showScreen("login-screen");
 }
 
 function showSetup() {
   appState.data = null;
   closeModal();
-  document.getElementById("login-screen").classList.add("hidden");
-  document.getElementById("setup-screen").classList.remove("hidden");
-  document.getElementById("child-register-screen").classList.add("hidden");
-  document.getElementById("app-header").classList.add("hidden");
-  document.getElementById("app-shell").classList.add("hidden");
-  setBottomNavVisible(false);
+  showScreen("setup-screen");
 }
 
 function showChildRegister() {
   appState.data = null;
   closeModal();
-  document.getElementById("login-screen").classList.add("hidden");
-  document.getElementById("setup-screen").classList.add("hidden");
-  document.getElementById("child-register-screen").classList.remove("hidden");
-  document.getElementById("app-header").classList.add("hidden");
-  document.getElementById("app-shell").classList.add("hidden");
-  setBottomNavVisible(false);
+  showScreen("child-register-screen");
   document.querySelector("#child-register-form input[name='username']")?.focus();
 }
 
@@ -419,9 +411,10 @@ function renderHome() {
   document.getElementById("pending-action-label").textContent = `${pending} 条待处理`;
   document.querySelector(".hero-actions.admin-only")?.classList.toggle("hidden", user.role !== "admin" || !hasChild);
   document.getElementById("no-child-panel")?.classList.toggle("hidden", !(user.role === "admin" && !hasChild));
+  const familyPoints = children.reduce((sum, item) => sum + Number(item.total_points), 0);
   const metrics = user.role === "admin" ? [
     ["孩子账户", children.length, "个", "metric-green"],
-    ["家庭总积分", children.reduce((sum, item) => sum + Number(item.total_points), 0), "分", "metric-blue"],
+    ["家庭总积分", familyPoints, "分", "metric-blue"],
     ["待审核申请", pending, "条", pending ? "metric-orange" : "metric-green"],
     ["本周变化", signed(weekTotal), "积分", weekTotal >= 0 ? "metric-green" : "metric-red"],
   ] : [
@@ -450,13 +443,18 @@ function renderHome() {
   preview.innerHTML = recent.length ? recent.map(requestMarkup).join("") : `<div class="empty-state">暂无申请记录</div>`;
 }
 
+// 等级权益打折后悬赏的实际发放分；载荷没带基础分就按原价，三处展示共用这一条回落规则。
+function taskRewardBase(task) {
+  return Number(task.base_reward_coins || task.reward_coins);
+}
+
 function renderHomeBroadcasts(data) {
   const taskList = document.getElementById("home-task-list");
   if (taskList) {
     const tasks = (data.tasks || []).slice(0, 4);
     taskList.innerHTML = tasks.length ? tasks.map(function (task) {
       const rewardCoins = Number(task.reward_coins);
-      const baseReward = Number(task.base_reward_coins || rewardCoins);
+      const baseReward = taskRewardBase(task);
       const rewardNote = baseReward !== rewardCoins ? '<small>基础 ' + baseReward.toLocaleString("zh-CN") + '</small>' : '';
       return '<button class="home-task-row" data-page-target="quests" type="button"><span class="home-task-icon">' + iconMarkup(task.icon, "earn", "home-task-visual") + '</span><span class="home-task-copy"><strong>' + escapeHtml(task.title) + '</strong><small>' + escapeHtml(TASK_TYPE_TEXT[task.task_type] || task.task_type) + ' · ' + escapeHtml(TASK_DIFFICULTY_TEXT[task.difficulty] || task.difficulty) + '</small></span><span class="home-task-reward">' + rewardCoins.toLocaleString("zh-CN") + ' 积分' + rewardNote + '</span></button>';
     }).join("") : '<div class="empty-state">暂无已发布任务</div>';
@@ -806,7 +804,7 @@ function renderQuests() {
     const assignments = appState.data.user.role === "admin" && task.assignments?.length ? `<div class="quest-assignees">${task.assignments.map(questAssignmentMarkup).join("")}</div>` : "";
     const due = task.due_date ? `截止 ${escapeHtml(task.due_date)}` : "长期有效";
     const rewardCoins = Number(task.reward_coins);
-    const baseReward = Number(task.base_reward_coins || rewardCoins);
+    const baseReward = taskRewardBase(task);
     const rewardNote = baseReward !== rewardCoins ? `<small class="quest-reward-note">基础 ${baseReward.toLocaleString("zh-CN")}</small>` : "";
     return `<article class="quest-card ${task.task_type === "epic" ? "epic" : ""}"><div class="quest-card-head"><div class="quest-card-title">${iconMarkup(task.icon, "earn", "quest-icon") }<div><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(task.category)} · ${TASK_TYPE_TEXT[task.task_type] || task.task_type}</p></div></div><span class="quest-rarity">${TASK_DIFFICULTY_TEXT[task.difficulty] || task.difficulty}</span></div><p class="quest-description">${escapeHtml(task.description || "完成后提交，等待验收。")}</p><div class="quest-card-meta"><span class="quest-reward">◆ ${rewardCoins.toLocaleString("zh-CN")} 积分${rewardNote}</span><span class="quest-reward">✦ ${Number(task.reward_exp).toLocaleString("zh-CN")} XP</span><span class="muted">${due}</span></div><div class="quest-card-actions">${taskActionMarkup(task)}</div>${assignments}</article>`;
   }).join("");
@@ -832,7 +830,7 @@ function renderQuestFocus() {
   title.textContent = task.title;
   description.textContent = task.description || "完成后提交，等待验收。";
   const rewardCoins = Number(task.reward_coins);
-  const baseReward = Number(task.base_reward_coins || rewardCoins);
+  const baseReward = taskRewardBase(task);
   reward.textContent = `${rewardCoins.toLocaleString("zh-CN")} 积分${baseReward !== rewardCoins ? `（基础 ${baseReward.toLocaleString("zh-CN")}）` : ""}`;
   exp.textContent = `${Number(task.reward_exp).toLocaleString("zh-CN")} XP`;
   const assignment = task.my_assignment;

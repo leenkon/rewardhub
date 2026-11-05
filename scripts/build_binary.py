@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a self-contained RewardHub executable with PyInstaller."""
+"""用 PyInstaller 打一个自带运行时的 RewardHub 可执行文件。"""
 
 from __future__ import annotations
 

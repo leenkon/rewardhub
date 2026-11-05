@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package a PyInstaller executable for GitHub Releases."""
+"""把 PyInstaller 打出的可执行文件整理成 GitHub Release 的附件。"""
 
 from __future__ import annotations
 
