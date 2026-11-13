@@ -52,7 +52,7 @@ def generated_secret_key() -> str:
 # Compose 转发的是 "${SECRET_KEY:-}"，所以未设置时传来的是空串，而不是根本没有这个变量。
 SECRET_KEY = os.getenv("SECRET_KEY") or generated_secret_key()
 PASSWORD_ITERATIONS = 240_000
-APP_VERSION = "0.8.17"
+APP_VERSION = "0.8.18"
 CHILD_AVATARS = {"boy", "girl"}
 ADULT_AVATARS = {"adult-male", "adult-female"}
 
