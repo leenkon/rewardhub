@@ -281,7 +281,7 @@ function updateAccountUi() {
 function syncSettleRun() {
   const unit = document.getElementById("settle-unit");
   const option = document.getElementById("settle-period").selectedOptions[0];
-  // settlePeriodUnit 是屏幕上这份列表真正归属的单位，所以重载进行中或失败时，结算保持不可点。
+  // settlePeriodUnit 记录这份列表最近一次加载归属的单位，所以重载进行中或失败时，结算保持不可点。
   document.getElementById("settle-run").disabled = unit.value !== appState.settlePeriodUnit || option?.dataset.closed !== "1";
 }
 
@@ -305,7 +305,8 @@ async function loadSettlePeriods() {
   } catch (error) {
     if (requestId !== settlePeriodRequest) return;
     select.innerHTML = "";
-    appState.settlePeriodUnit = "";
+    // 失败也记下这个单位，否则每次重绘都会再拉一次、把同一条提示刷屏。
+    appState.settlePeriodUnit = unit;
     showToast(error.message);
   }
   syncSettleRun();
@@ -636,6 +637,46 @@ async function resetRule(kind, itemId) {
   } catch (error) { showToast(error.message); }
 }
 
+function renderRuleCopyTargets(preselect) {
+  const form = document.getElementById("rule-copy-form");
+  const source = form.elements.source.value;
+  const checked = preselect || new Set([...form.querySelectorAll("input[name='target']:checked")].map((input) => Number(input.value)));
+  const children = (appState.data.children || []).filter((child) => String(child.id) !== source);
+  document.getElementById("rule-copy-list").innerHTML = children.length
+    ? children.map((child) => `<label><input type="checkbox" name="target" value="${child.id}"${checked.has(Number(child.id)) ? " checked" : ""}>${escapeHtml(child.display_name)}</label>`).join("")
+    : `<div class="empty-state">没有其他孩子可抄</div>`;
+}
+
+function openRuleCopy() {
+  const children = appState.data.children || [];
+  if (!children.length) { showToast("请先创建孩子账号"); return; }
+  const form = document.getElementById("rule-copy-form");
+  form.elements.source.innerHTML = `<option value="">系统库</option>${children.map((child) => `<option value="${child.id}">${escapeHtml(child.display_name)}</option>`).join("")}`;
+  form.elements.source.value = "";
+  renderRuleCopyTargets(new Set([Number(appState.bindingChildId)]));
+  showModal("rule-copy-form");
+}
+
+async function saveRuleCopy(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const targetIds = [...form.querySelectorAll("input[name='target']:checked")].map((input) => Number(input.value));
+  if (!targetIds.length) { showToast("请选择接收规则的孩子"); return; }
+  try {
+    appState.data = await api("/api/item-rules/copy", {
+      method: "POST",
+      body: JSON.stringify({
+        source_id: form.elements.source.value ? Number(form.elements.source.value) : null,
+        target_ids: targetIds,
+        include_bindings: form.elements.include_bindings.checked,
+      }),
+    });
+    closeModal();
+    render();
+    showToast(`已复制给 ${targetIds.length} 个孩子`);
+  } catch (error) { showToast(error.message); }
+}
+
 async function toggleBinding(dataset) {
   const childId = Number(dataset.child);
   appState.data = await api(`/api/item-bindings/${childId}`, {
@@ -646,24 +687,46 @@ async function toggleBinding(dataset) {
   renderManagement();
 }
 
+function matrixHead(children) {
+  return `<tr><th>项目</th>${children.map((child) => `<th>${escapeHtml(child.display_name)}</th>`).join("")}</tr>`;
+}
+
+function flowRows(items, sign, children) {
+  if (!items.length) {
+    return `<tr><td colspan="${children.length + 1}"><div class="empty-state">近 7 天没有${sign === "income" ? "得分" : "失分"}</div></td></tr>`;
+  }
+  return items.map((item) => `<tr><th class="flow-name">${escapeHtml(item.name)}</th>${children.map((child) => {
+    const stat = item.children?.[String(child.id)];
+    // 这个孩子近 7 天没碰过这个项目就留白，不补 0 让空列和真记录混在一起。
+    if (!stat) return "<td></td>";
+    return `<td class="flow-cell"><span>${stat.count} 次</span><strong class="${sign}">${signed(stat.total)}</strong></td>`;
+  }).join("")}</tr>`).join("");
+}
+
 function renderHomeFlow() {
   const flow = appState.data.recent_flow;
   const gainedBox = document.getElementById("home-flow-gained");
   if (!gainedBox) return;
   if (!flow) {
-    gainedBox.innerHTML = `<div class="empty-state">创建孩子账号后显示。</div>`;
+    gainedBox.innerHTML = `<tr><td><div class="empty-state">创建孩子账号后显示。</div></td></tr>`;
+    document.getElementById("home-flow-gained-head").innerHTML = "";
+    document.getElementById("home-flow-lost-head").innerHTML = "";
     document.getElementById("home-flow-lost").innerHTML = "";
     document.getElementById("home-flow-net").textContent = "净 0";
     return;
   }
-  const row = (item, sign) => `<div class="flow-row"><span class="flow-name">${escapeHtml(item.name)}</span><small>${item.count} 次</small><strong class="${sign}">${sign === "income" ? "+" : "-"}${Number(item.total).toLocaleString("zh-CN")}</strong></div>`;
-  gainedBox.innerHTML = flow.top_gained.length ? flow.top_gained.map((item) => row(item, "income")).join("") : `<div class="empty-state">近 7 天没有得分</div>`;
-  document.getElementById("home-flow-lost").innerHTML = flow.top_lost.length ? flow.top_lost.map((item) => row(item, "expense")).join("") : `<div class="empty-state">近 7 天没有失分</div>`;
+  const children = flow.children || [];
+  const head = matrixHead(children);
+  document.getElementById("home-flow-gained-head").innerHTML = head;
+  document.getElementById("home-flow-lost-head").innerHTML = head;
+  gainedBox.innerHTML = flowRows(flow.gained_items || [], "income", children);
+  document.getElementById("home-flow-lost").innerHTML = flowRows(flow.lost_items || [], "expense", children);
   const net = document.getElementById("home-flow-net");
   net.textContent = `净 ${signed(flow.net)}`;
   net.classList.toggle("income", flow.net >= 0);
   net.classList.toggle("expense", flow.net < 0);
-  document.getElementById("home-flow-note").textContent = `得分 ${flow.gained} · 失分 ${flow.lost}`;
+  const scope = children.length > 1 ? "全部孩子 · " : "";
+  document.getElementById("home-flow-note").textContent = `${scope}得分 ${flow.gained_total} · 失分 ${flow.lost_total}`;
 }
 
 const CAP_PERIOD_TEXT = {
@@ -694,16 +757,19 @@ function targetTallyText(item, kind) {
   return `${targetPeriodText(item)}${kind === "deduct" ? "上限" : ""}${tally}`;
 }
 
-function ruleSummary(item, kind) {
+function ruleSummary(item, kind, withPoints = false) {
   const target = Number(item.week_target || 0);
   const parts = [];
   const deduct = kind === "deduct";
+  const base = Math.abs(Number(item.points) || 0);
+  const byQuantity = isQuantityItem(item, kind);
+  // 数量口径要达标才给完成分，那一笔由下面的「达标」项说明；次数口径每提交一次就结算。
+  if (withPoints && base && !byQuantity) parts.push(`每次${deduct ? "-" : "+"}${base}`);
   if (target) {
-    const byQuantity = isQuantityItem(item, kind);
     const bonusEvery = Number(item.bonus_every || 1);
     parts.push(targetTallyText(item, kind));
     if (byQuantity) {
-      parts.push(`达标+${Math.abs(Number(item.points))}`);
+      parts.push(`达标${deduct ? "-" : "+"}${base}`);
       if (item.week_bonus) parts.push(bonusEvery > 1 ? `超额每满${bonusEvery}个+${item.week_bonus}` : `超额每个+${item.week_bonus}`);
     } else if (item.week_bonus) {
       const sign = deduct ? "-" : "+";
@@ -802,7 +868,7 @@ function renderQuests() {
     const rewardCoins = Number(task.reward_coins);
     const baseReward = taskRewardBase(task);
     const rewardNote = baseReward !== rewardCoins ? `<small class="quest-reward-note">基础 ${baseReward.toLocaleString("zh-CN")}</small>` : "";
-    return `<article class="quest-card ${task.task_type === "epic" ? "epic" : ""}"><div class="quest-card-head"><div class="quest-card-title">${iconMarkup(task.icon, "earn", "quest-icon") }<div><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(task.category)} · ${TASK_TYPE_TEXT[task.task_type] || task.task_type}</p></div></div><span class="quest-rarity">${TASK_DIFFICULTY_TEXT[task.difficulty] || task.difficulty}</span></div><p class="quest-description">${escapeHtml(task.description || "完成后提交，等待验收。")}</p><div class="quest-card-meta"><span class="quest-reward">◆ ${rewardCoins.toLocaleString("zh-CN")} 积分${rewardNote}</span><span class="quest-reward">✦ ${Number(task.reward_exp).toLocaleString("zh-CN")} XP</span><span class="muted">${due}</span></div><div class="quest-card-actions">${taskActionMarkup(task)}</div>${assignments}</article>`;
+    return `<article class="quest-card ${task.task_type === "epic" ? "epic" : ""}"><div class="quest-card-head"><div class="quest-card-title">${iconMarkup(task.icon, "earn", "quest-icon") }<div><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(task.category)} · ${escapeHtml(TASK_TYPE_TEXT[task.task_type] || task.task_type)}</p></div></div><span class="quest-rarity">${escapeHtml(TASK_DIFFICULTY_TEXT[task.difficulty] || task.difficulty)}</span></div><p class="quest-description">${escapeHtml(task.description || "完成后提交，等待验收。")}</p><div class="quest-card-meta"><span class="quest-reward">◆ ${rewardCoins.toLocaleString("zh-CN")} 积分${rewardNote}</span><span class="quest-reward">✦ ${Number(task.reward_exp).toLocaleString("zh-CN")} XP</span><span class="muted">${due}</span></div><div class="quest-card-actions">${taskActionMarkup(task)}</div>${assignments}</article>`;
   }).join("");
 }
 
@@ -1128,12 +1194,13 @@ function periodHeadText(unit, start) {
   return chartLabelShort(start);
 }
 
-function periodCellMarkup(tally, measure) {
-  if (!tally) return "<td></td>";
+// 每个孩子按自己的规则计量，所以量词跟着格子的 measure 走，而不是整行共用一份。
+function periodCellMarkup(cell) {
+  if (!cell) return "<td></td>";
   // 窗口可能只罚分而里面一条记录都没有，所以只在确实有完成时才显示计数。
-  const done = tally.count || tally.quantity ? (measure === "quantity" ? `${tally.quantity}个` : `${tally.count}次`) : "";
-  const coins = tally.coins ? `<em class="${tally.coins > 0 ? "up" : "down"}">${signed(tally.coins)}</em>` : "";
-  const payout = tally.payout ? `<em class="payout ${tally.payout > 0 ? "up" : "down"}">${signed(tally.payout)}</em>` : "";
+  const done = cell.count || cell.quantity ? (cell.measure === "quantity" ? `${cell.quantity}个` : `${cell.count}次`) : "";
+  const coins = cell.coins ? `<em class="${cell.coins > 0 ? "up" : "down"}">${signed(cell.coins)}</em>` : "";
+  const payout = cell.payout ? `<em class="payout ${cell.payout > 0 ? "up" : "down"}">${signed(cell.payout)}</em>` : "";
   if (!done && !coins && !payout) return "<td></td>";
   return `<td class="period-cell">${done ? `<span>${done}</span>` : ""}${coins}${payout}</td>`;
 }
@@ -1143,22 +1210,20 @@ function renderItemPeriods(data = appState.analytics) {
   if (!table) return;
   const rows = table.items?.[appState.analyticsKind] || [];
   const other = table.other || {};
-  const childName = (id) => (data.children || []).find((child) => String(child.id) === String(id))?.display_name || "";
-  document.getElementById("period-head").innerHTML = `<tr><th>项目</th><th>孩子</th><th>合计</th>${
-    table.periods.map((period) => `<th title="${escapeHtml(period.label)}">${periodHeadText(table.unit, period.start)}</th>`).join("")
-  }</tr>`;
-  document.getElementById("period-body").innerHTML = rows.map((item) => `<tr><th class="period-name">${escapeHtml(item.name)}</th><td class="period-who">${escapeHtml(childName(item.account_id))}</td>${
-    periodCellMarkup(item.total, item.measure)
-  }${item.cells.map((cell) => periodCellMarkup(cell, item.measure)).join("")}</tr>`).join("");
+  const children = table.children || [];
+  document.getElementById("period-head").innerHTML = matrixHead(children);
+  document.getElementById("period-body").innerHTML = rows.map((item) => `<tr><th class="period-name">${escapeHtml(item.name)}</th>${
+    item.cells.map(periodCellMarkup).join("")
+  }</tr>`).join("");
   const coinsText = other.gained ? `<em class="up">+${other.gained}</em>` : "";
   const lostText = other.lost ? `<em class="down">-${other.lost}</em>` : "";
   document.getElementById("period-foot").innerHTML = other.count
-    ? `<tr><th class="period-name" colspan="3">兑换与其他</th><td colspan="${table.periods.length}">${other.count} 笔 ${coinsText}${lostText}</td></tr>`
+    ? `<tr><th class="period-name">兑换与其他</th><td colspan="${children.length || 1}">${other.count} 笔 ${coinsText}${lostText}</td></tr>`
     : "";
   const payoutLines = rows.map((item) => item.cells.map((cell, index) => {
     if (!cell || !cell.detail || !cell.detail.length) return "";
-    const when = periodHeadText(table.unit, table.periods[index].start);
-    return cell.detail.map((entry) => `<div class="payout-line"><small>${when}</small><small>${escapeHtml(childName(item.account_id))}</small><span>${escapeHtml(entry.title)}</span><em>${RECORD_SOURCE_LABEL[entry.source] || ""}</em><strong class="${entry.amount > 0 ? "up" : "down"}">${signed(entry.amount)}</strong></div>`).join("");
+    const who = escapeHtml(children[index]?.display_name || "");
+    return cell.detail.map((entry) => `<div class="payout-line"><small>${periodHeadText(table.unit, entry.start)}</small><small>${who}</small><span>${escapeHtml(entry.title)}</span><em>${RECORD_SOURCE_LABEL[entry.source] || ""}</em><strong class="${entry.amount > 0 ? "up" : "down"}">${signed(entry.amount)}</strong></div>`).join("");
   }).join("")).join("");
   const payoutBlock = document.getElementById("period-payouts");
   payoutBlock.classList.toggle("hidden", !payoutLines);
@@ -1368,11 +1433,11 @@ function targetRows(childId, filter) {
     libraryItems(kind).forEach((base) => {
       if (off.has(Number(base.id))) return;
       const item = effectiveItem(childId, kind, base);
-      rows.push({ kind, key: `${kind}:${item.id}`, item, goal: targetTallyText(item, kind) });
+      rows.push({ kind, key: `${kind}:${item.id}`, item, rule: ruleSummary(item, kind, true) });
     });
   });
-  // 没有规则的项目依然要出现在可打印的表上，只是把「目标」那格留白让人手写。
-  return filter === "goal" ? rows.filter((row) => row.goal) : rows;
+  // 没有规则的项目依然要出现在可打印的表上，只是把「规则」那列留白让人手写。
+  return filter === "goal" ? rows.filter((row) => Number(row.item.week_target || 0) > 0) : rows;
 }
 
 function targetEmptyText(filter) {
@@ -1446,12 +1511,12 @@ async function refreshTargetStatus(model) {
 
 function renderTargetSheets() {
   const model = targetSheetModel();
-  document.getElementById("target-sheets").innerHTML = model.sheets.map((sheet) => `<section class="target-sheet"><div class="sheet-head"><h2>${escapeHtml(sheet.child.display_name)}</h2><p>${model.range}</p></div><div class="table-scroll"><table class="target-table"><thead><tr><th>项目</th><th>目标</th>${model.columns
+  document.getElementById("target-sheets").innerHTML = model.sheets.map((sheet) => `<section class="target-sheet"><div class="sheet-head"><h2>${escapeHtml(sheet.child.display_name)}</h2><p>${model.range}</p></div><div class="table-scroll"><table class="target-table"><thead><tr><th>项目</th><th>规则</th>${model.columns
     .map((column) => `<th class="${column.weekend ? "weekend" : ""}"><b>${column.top}</b><small>${column.sub}</small></th>`)
     .join("")}</tr></thead><tbody>${sheet.rows
     .map((row) => {
       const texts = targetRowCells(model, sheet.child.id, row);
-      return `<tr><th class="sheet-name" title="${escapeHtml(ruleSummary(row.item, row.kind))}">${escapeHtml(row.item.name)}</th><td class="sheet-goal">${row.goal}</td>${model.columns
+      return `<tr><th class="sheet-name">${escapeHtml(row.item.name)}</th><td class="sheet-rule">${escapeHtml(row.rule)}</td>${model.columns
         .map((column, index) => `<td class="${column.weekend ? "weekend" : ""}${texts[index] ? ` done-${row.kind}` : ""}">${texts[index]}</td>`)
         .join("")}</tr>`;
     })
@@ -1474,10 +1539,10 @@ async function exportTargetSheet() {
       unit: model.unit,
       date: model.day,
       range: model.range,
-      heads: [["项目", "目标"].concat(model.columns.map((column) => column.top)), ["", ""].concat(model.columns.map((column) => column.sub))],
+      heads: [["项目", "规则"].concat(model.columns.map((column) => column.top)), ["", ""].concat(model.columns.map((column) => column.sub))],
       sheets: model.sheets.map((sheet) => ({
         name: sheet.child.display_name,
-        rows: sheet.rows.map((row) => [row.item.name, row.goal].concat(targetRowCells(model, sheet.child.id, row))),
+        rows: sheet.rows.map((row) => [row.item.name, row.rule].concat(targetRowCells(model, sheet.child.id, row))),
       })),
     };
     const response = await fetch("/api/targets/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -1492,7 +1557,8 @@ async function exportTargetSheet() {
     link.href = url;
     link.download = disposition ? decodeURIComponent(disposition[1]) : `targets_${model.day}.xlsx`;
     link.click();
-    URL.revokeObjectURL(url);
+    // 立刻回收会让部分浏览器还没取到文件就断掉下载，排到当前任务之后再释放。
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (error) {
     showToast(error.message);
   } finally {
@@ -1657,7 +1723,7 @@ function openSelfPassword() {
 }
 
 function showModal(formId) {
-  ["editor-form", "account-form", "self-password-form", "confirm-modal"].forEach((id) => document.getElementById(id).classList.toggle("hidden", id !== formId));
+  ["editor-form", "account-form", "self-password-form", "rule-copy-form", "confirm-modal"].forEach((id) => document.getElementById(id).classList.toggle("hidden", id !== formId));
   document.getElementById("modal-backdrop").classList.remove("hidden");
 }
 
@@ -1693,9 +1759,8 @@ function settleConfirm(confirmed) {
 }
 
 function findItem(kind, id) {
-  const source = kind === "earn" ? appState.data.earn_items : kind === "exchange" || kind === "reward" ? appState.data.rewards : appState.data.deduct_items;
-  const library = appState.data.item_library?.[kind === "exchange" ? "reward" : kind] || [];
-  return (source || []).find((item) => Number(item.id) === Number(id)) || library.find((item) => Number(item.id) === Number(id));
+  const source = kind === "earn" ? appState.data.earn_items : kind === "exchange" ? appState.data.rewards : appState.data.deduct_items;
+  return (source || []).find((item) => Number(item.id) === Number(id));
 }
 
 function libraryItems(kind) {
@@ -2150,14 +2215,39 @@ document.addEventListener("click", async (event) => {
   } catch (error) { showToast(error.message); } finally { action.disabled = false; }
 });
 
-document.addEventListener("submit", async (event) => {
+// 表单不会像按钮那样在提交期间自动失效，连按两次回车就会发两遍请求。
+function guardSubmit(handler) {
+  return async (event) => {
+    // 委托监听里 currentTarget 是 document，真正的表单要从事件源往上找。
+    const form = event.currentTarget instanceof HTMLFormElement ? event.currentTarget : event.target.closest("form");
+    if (!form) return;
+    if (form.dataset.submitting === "1") {
+      event.preventDefault();
+      return;
+    }
+    form.dataset.submitting = "1";
+    try {
+      await handler(event);
+    } finally {
+      delete form.dataset.submitting;
+    }
+  };
+}
+
+document.addEventListener("submit", guardSubmit(async (event) => {
   if (event.target.matches("form[data-kind]")) {
     event.preventDefault();
     try { await saveEarnRequest(event); } catch (error) { showToast(error.message); }
   }
-});
+}));
 
-document.getElementById("login-form").addEventListener("submit", async (event) => {
+function checkPasswordMatch(form, error) {
+  if (form.elements.password.value === form.elements.password_confirm.value) return true;
+  error.textContent = "两次输入的密码不一致";
+  return false;
+}
+
+document.getElementById("login-form").addEventListener("submit", guardSubmit(async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   try {
@@ -2166,17 +2256,14 @@ document.getElementById("login-form").addEventListener("submit", async (event) =
     appState.page = "home";
     await loadState();
   } catch (error) { document.getElementById("login-error").textContent = error.message; }
-});
+}));
 
-document.getElementById("child-register-form").addEventListener("submit", async (event) => {
+document.getElementById("child-register-form").addEventListener("submit", guardSubmit(async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const error = document.getElementById("child-register-error");
   error.textContent = "";
-  if (form.elements.password.value !== form.elements.password_confirm.value) {
-    error.textContent = "两次输入的密码不一致";
-    return;
-  }
+  if (!checkPasswordMatch(form, error)) return;
   try {
     await api("/api/auth/register-child", {
       method: "POST",
@@ -2193,17 +2280,14 @@ document.getElementById("child-register-form").addEventListener("submit", async 
   } catch (requestError) {
     error.textContent = requestError.message;
   }
-});
+}));
 
-document.getElementById("setup-form").addEventListener("submit", async (event) => {
+document.getElementById("setup-form").addEventListener("submit", guardSubmit(async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const error = document.getElementById("setup-error");
   error.textContent = "";
-  if (form.elements.password.value !== form.elements.password_confirm.value) {
-    error.textContent = "两次输入的密码不一致";
-    return;
-  }
+  if (!checkPasswordMatch(form, error)) return;
   try {
     await api("/api/setup/admin", {
       method: "POST",
@@ -2218,17 +2302,20 @@ document.getElementById("setup-form").addEventListener("submit", async (event) =
   } catch (requestError) {
     error.textContent = requestError.message;
   }
-});
+}));
 
-document.getElementById("editor-form").addEventListener("submit", saveEditor);
-document.getElementById("account-form").addEventListener("submit", saveAccount);
-document.getElementById("self-password-form").addEventListener("submit", saveSelfPassword);
-document.getElementById("currency-form").addEventListener("submit", saveCurrencySettings);
-document.getElementById("adventure-level-form")?.addEventListener("submit", saveAdventureLevel);
-document.getElementById("quest-form").addEventListener("submit", saveTask);
+document.getElementById("editor-form").addEventListener("submit", guardSubmit(saveEditor));
+document.getElementById("account-form").addEventListener("submit", guardSubmit(saveAccount));
+document.getElementById("self-password-form").addEventListener("submit", guardSubmit(saveSelfPassword));
+document.getElementById("rule-copy-form").addEventListener("submit", guardSubmit(saveRuleCopy));
+document.querySelector("#rule-copy-form [name='source']").addEventListener("change", () => renderRuleCopyTargets());
+document.getElementById("binding-copy").addEventListener("click", openRuleCopy);
+document.getElementById("currency-form").addEventListener("submit", guardSubmit(saveCurrencySettings));
+document.getElementById("adventure-level-form")?.addEventListener("submit", guardSubmit(saveAdventureLevel));
+document.getElementById("quest-form").addEventListener("submit", guardSubmit(saveTask));
 document.getElementById("cancel-quest-edit")?.addEventListener("click", resetQuestEditor);
-document.getElementById("announcement-form")?.addEventListener("submit", saveAnnouncement);
-document.getElementById("cash-exchange-form").addEventListener("submit", saveCashExchange);
+document.getElementById("announcement-form")?.addEventListener("submit", guardSubmit(saveAnnouncement));
+document.getElementById("cash-exchange-form").addEventListener("submit", guardSubmit(saveCashExchange));
 document.querySelector("#cash-exchange-form input[name='points']").addEventListener("input", updateCashExchangePreview);
 document.getElementById("announcement-popup-close")?.addEventListener("click", closeAnnouncementPopup);
 document.getElementById("announcement-popup-ack")?.addEventListener("click", closeAnnouncementPopup);
@@ -2253,8 +2340,21 @@ document.getElementById("adventure-level-form")?.elements.mode.addEventListener(
   if (level) level.disabled = event.target.value !== "manual";
 });
 document.getElementById("logout-button").addEventListener("click", async () => { try { await api("/api/auth/logout", { method: "POST" }); } finally { showLogin(); } });
+let childSelectRequest = 0;
 document.getElementById("child-select").addEventListener("change", async (event) => {
-  try { appState.data = await api("/api/auth/select-child", { method: "POST", body: JSON.stringify({ child_id: Number(event.target.value) }) }); navigate("home"); showToast(`已切换到 ${appState.data.active_child.display_name}`); } catch (error) { showToast(error.message); }
+  const requestId = ++childSelectRequest;
+  try {
+    const data = await api("/api/auth/select-child", { method: "POST", body: JSON.stringify({ child_id: Number(event.target.value) }) });
+    // 连点几下切换孩子时，晚到的旧应答不能把界面拉回上一个孩子。
+    if (requestId !== childSelectRequest) return;
+    appState.data = data;
+    // 管理员只是换了个观察对象：停在当前页面重绘，项目规则也跟着看这个孩子。
+    appState.bindingChildId = Number(appState.data.active_child_id) || appState.bindingChildId;
+    render();
+    showToast(`已切换到 ${appState.data.active_child.display_name}`);
+  } catch (error) {
+    if (requestId === childSelectRequest) showToast(error.message);
+  }
 });
 document.getElementById("prev-month").addEventListener("click", () => { if (appState.historyMonth === 0) { appState.historyMonth = 11; appState.historyYear -= 1; } else appState.historyMonth -= 1; renderHistory(); });
 document.getElementById("next-month").addEventListener("click", () => { if (appState.historyMonth === 11) { appState.historyMonth = 0; appState.historyYear += 1; } else appState.historyMonth += 1; renderHistory(); });

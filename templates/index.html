@@ -140,7 +140,7 @@
 
       <section class="content-panel home-flow-panel">
         <div class="section-heading"><div><h2>近 7 天得分与失分</h2><p class="panel-note" id="home-flow-note"></p></div><span class="home-flow-total" id="home-flow-net">净 0</span></div>
-        <div class="flow-pair"><div class="flow-column"><h3 class="flow-title income">得分</h3><div class="flow-list" id="home-flow-gained"></div></div><div class="flow-column"><h3 class="flow-title expense">失分</h3><div class="flow-list" id="home-flow-lost"></div></div></div>
+        <div class="flow-pair"><div class="flow-column"><h3 class="flow-title income">得分</h3><div class="table-scroll"><table class="management-table flow-table"><thead id="home-flow-gained-head"></thead><tbody id="home-flow-gained"></tbody></table></div></div><div class="flow-column"><h3 class="flow-title expense">失分</h3><div class="table-scroll"><table class="management-table flow-table"><thead id="home-flow-lost-head"></thead><tbody id="home-flow-lost"></tbody></table></div></div></div>
       </section>
     </section>
 
@@ -220,7 +220,7 @@
        <section class="content-panel currency-panel"><div><h2>积分兑换现金</h2><p class="panel-note" id="currency-rule">100 积分 = 1 元</p></div><form id="currency-form" class="currency-form"><label>兑换 1 元所需积分<input name="points_per_yuan" type="number" min="1" max="1000000" step="1" required></label><button class="button button-primary" type="submit">保存</button></form></section>
        <div class="settings-grid"><section class="content-panel"><div class="section-heading library-heading"><h2>加积分项目库</h2><div class="binding-tools"><span class="rule-sync hidden" data-rule-kind="earn">抄自<select class="rule-sync-source child-select" aria-label="加积分规则来源孩子"></select></span><button class="button button-small button-primary" data-open-editor="earn" type="button">新增</button></div></div><div class="item-list" id="earn-manage-list"></div></section><section class="content-panel"><div class="section-heading library-heading"><h2>扣积分项目库</h2><div class="binding-tools"><span class="rule-sync hidden" data-rule-kind="deduct">抄自<select class="rule-sync-source child-select" aria-label="扣积分规则来源孩子"></select></span><button class="button button-small button-danger" data-open-editor="deduct" type="button">新增</button></div></div><div class="item-list" id="deduct-manage-list"></div></section><section class="content-panel"><div class="section-heading library-heading"><h2>兑换奖励项目库</h2><div class="binding-tools"><button class="button button-small button-dark" data-open-editor="reward" type="button">新增</button></div></div><div class="item-list" id="reward-manage-list"></div></section></div>
        <section class="content-panel binding-panel">
-         <div class="section-heading"><div><h2>项目绑定 <span class="binding-count" id="binding-summary"></span></h2></div><div class="binding-tools"><div class="chart-tabs" id="binding-children" role="group" aria-label="选择孩子"></div><button class="button button-small button-outline" id="binding-reset" type="button">恢复绑定</button></div></div>
+         <div class="section-heading"><div><h2>项目绑定 <span class="binding-count" id="binding-summary"></span></h2></div><div class="binding-tools"><div class="chart-tabs" id="binding-children" role="group" aria-label="选择孩子"></div><button class="button button-small button-outline" id="binding-copy" type="button">复制规则</button><button class="button button-small button-outline" id="binding-reset" type="button">恢复绑定</button></div></div>
          <div class="binding-grid" id="binding-grid"></div>
        </section>
     </section>
@@ -292,6 +292,14 @@
       <label>新密码<input name="password" type="password" autocomplete="new-password" minlength="6" required></label>
       <label>确认新密码<input name="password_confirm" type="password" autocomplete="new-password" minlength="6" required></label>
       <div class="modal-actions"><button class="button button-outline" type="button" data-close-modal>取消</button><button class="button button-primary" type="submit">保存新密码</button></div>
+    </form>
+    <form class="modal hidden" id="rule-copy-form">
+      <div class="modal-header"><div><h2>复制规则</h2></div><button class="icon-button" type="button" data-close-modal aria-label="关闭">×</button></div>
+      <label>来源<select name="source"></select></label>
+      <fieldset class="rule-copy-targets"><legend>抄给</legend><div class="rule-copy-list" id="rule-copy-list"></div></fieldset>
+      <label class="rule-copy-check"><input type="checkbox" name="include_bindings" checked>同时复制项目绑定</label>
+      <p class="panel-note">会覆盖接收孩子原有的规则；兑换奖励只复制绑定。</p>
+      <div class="modal-actions"><button class="button button-outline" type="button" data-close-modal>取消</button><button class="button button-primary" type="submit">开始复制</button></div>
     </form>
     <section class="modal confirm-modal hidden" id="confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
       <div class="modal-header"><div><h2 id="confirm-title">请确认操作</h2></div><button class="icon-button" type="button" id="confirm-close" aria-label="取消">×</button></div>

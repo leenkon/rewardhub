@@ -648,7 +648,7 @@ class PointsManagerApiTests(unittest.TestCase):
             201,
         )
         self.assertEqual(self.state()["records"][0]["title"], "补录：阅读（漏记了）")
-        # The entry badge reads the date picked above the list, so a 补录 day carries its own tally.
+        # 项目行的角标读的是列表上方选中的日期，所以补录那天带着自己的计数。
         row = self.earn_item_row(item_id)
         self.assertEqual((row["day_counts"][yesterday], row["day_counts"][date.today().isoformat()]), (1, 1))
 
@@ -782,6 +782,7 @@ class PointsManagerApiTests(unittest.TestCase):
                 "reward_coins": 10,
                 "reward_exp": 4,
                 "icon": "cleaning.svg",
+                "due_date": "2026-12-31",
             },
         ).get_json()["task"]["id"]
 
@@ -793,6 +794,8 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(task["description"], "袋子换好放回原位")
         self.assertEqual(task["icon"], "cleaning.svg")
         self.assertEqual(task["difficulty"], "easy")
+        # 编辑是部分更新：载荷没带的截止日期要沿用库里那行，不能被清空。
+        self.assertEqual(task["due_date"], "2026-12-31")
 
         deleted = self.client.delete(f"/api/tasks/{task_id}")
         self.assertTrue(deleted.get_json()["deleted"])
@@ -953,7 +956,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(len(self.settlement_rows(item["id"])), 1)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
-    def test_period_table_splits_rows_per_child(self):
+    def test_period_table_puts_children_in_columns(self):
         plain = self.create_child(username="kid-plain")
         target = self.create_child(username="kid-quantity")
         item = self.client.post("/api/items/earn", json={"name": "两种口径", "points": 3, "icon": "book.svg"}).get_json()
@@ -969,16 +972,38 @@ class PointsManagerApiTests(unittest.TestCase):
             201,
         )
 
-        rows = self.client.get("/api/analytics?days=7").get_json()["item_periods"]["items"]["earn"]
-        # 一张表一行一个孩子、各按自己生效的规则计量：覆盖规则让第二条记录零分。
+        table = self.client.get("/api/analytics?days=7").get_json()["item_periods"]
+        rows = [row for row in table["items"]["earn"] if row["item_id"] == item["id"]]
+        # 同一个项目只占一行，两个孩子各占一列；量词跟着各自的生效规则走。
+        self.assertEqual(len(rows), 1)
+        columns = [child["id"] for child in table["children"]]
+        cells = {columns[index]: cell for index, cell in enumerate(rows[0]["cells"])}
         self.assertEqual(
-            [
-                (row["account_id"], row["name"], row["measure"], row["total"]["count"], row["total"]["quantity"], row["total"]["coins"])
-                for row in rows
-                if row["item_id"] == item["id"]
-            ],
-            [(plain["id"], "两种口径", "count", 1, 0, 3), (target["id"], "两种口径", "quantity", 1, 4, 0)],
+            (cells[plain["id"]]["measure"], cells[plain["id"]]["count"], cells[plain["id"]]["quantity"], cells[plain["id"]]["coins"]),
+            ("count", 1, 0, 3),
         )
+        self.assertEqual(
+            (cells[target["id"]]["measure"], cells[target["id"]]["count"], cells[target["id"]]["quantity"], cells[target["id"]]["coins"]),
+            ("quantity", 1, 4, 0),
+        )
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
+    def test_project_table_counts_one_submission_per_day(self):
+        child = self.create_child(username="kid-once-a-day")
+        item = self.client.post(
+            "/api/items/earn",
+            json={"name": "一日一次", "points": 2, "icon": "book.svg", "week_target": 2, "count_days_once": 1},
+        ).get_json()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        for _ in range(3):
+            self.assertEqual(self.submit_earn(item["id"]).status_code, 201)
+
+        table = self.client.get("/api/analytics?days=7").get_json()["item_periods"]
+        row = next(row for row in table["items"]["earn"] if row["item_id"] == item["id"])
+        position = [child_row["id"] for child_row in table["children"]].index(child["id"])
+        cell = row["cells"][position]
+        # 与角标、目标表同一口径：同一天三次只算 1 次，积分仍按三笔计。
+        self.assertEqual((cell["count"], cell["coins"]), (1, 6))
         self.client.delete(f"/api/items/earn/{item['id']}")
 
     def test_item_rule_copy_takes_the_source_childs_effective_rule(self):
@@ -1026,6 +1051,101 @@ class PointsManagerApiTests(unittest.TestCase):
         snapshot = response.get_json()["item_rules"][str(target["id"])]["earn"][str(item["id"])]
         self.assertEqual(snapshot["week_target"], 0)
         self.assertTrue(snapshot["rule_set_at"])
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
+    def test_bulk_rule_copy_snapshots_the_library_and_clears_bindings(self):
+        first = self.create_child(username="kid-first")
+        second = self.create_child(username="kid-second")
+        earn = self.client.post(
+            "/api/items/earn", json={"name": "整库加分", "points": 5, "icon": "book.svg", "week_target": 2, "week_bonus": 3}
+        ).get_json()
+        deduct = self.client.post("/api/items/deduct", json={"name": "整库扣分", "points": 2}).get_json()
+        reward = self.client.post("/api/items/reward", json={"name": "整库奖励", "points": 10}).get_json()
+        for child in (first, second):
+            self.client.put(
+                f"/api/item-bindings/{child['id']}",
+                json={"bindings": [
+                    {"kind": "deduct", "item_id": deduct["id"], "enabled": False},
+                    {"kind": "reward", "item_id": reward["id"], "enabled": False},
+                ]},
+            )
+
+        response = self.client.post(
+            "/api/item-rules/copy",
+            json={"source_id": None, "target_ids": [first["id"]], "include_bindings": True},
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        rules = data["item_rules"][str(first["id"])]
+        self.assertEqual(rules["earn"][str(earn["id"])]["week_target"], 2)
+        self.assertEqual(rules["earn"][str(earn["id"])]["week_bonus"], 3)
+        self.assertIn(str(deduct["id"]), rules["deduct"])
+        self.assertEqual(data["item_bindings"][str(first["id"])], {"earn": [], "deduct": [], "reward": []})
+        # 没点名的孩子仍然只跟着库走，规则快照与被排除的项目都没变。
+        self.assertEqual(data["item_rules"][str(second["id"])]["earn"], {})
+        self.assertEqual(data["item_bindings"][str(second["id"])]["deduct"], [deduct["id"]])
+        self.client.delete(f"/api/items/earn/{earn['id']}")
+        self.client.delete(f"/api/items/deduct/{deduct['id']}")
+        self.client.delete(f"/api/items/reward/{reward['id']}")
+
+    def test_bulk_rule_copy_takes_rules_and_bindings_from_a_child(self):
+        source = self.create_child(username="kid-source")
+        first = self.create_child(username="kid-first")
+        second = self.create_child(username="kid-second")
+        earn = self.client.post(
+            "/api/items/earn", json={"name": "抄整套", "points": 4, "icon": "book.svg", "week_target": 3, "week_bonus": 1}
+        ).get_json()
+        deduct = self.client.post("/api/items/deduct", json={"name": "抄可见范围", "points": 2}).get_json()
+        self.client.put(
+            f"/api/item-rules/{source['id']}",
+            json={"kind": "earn", "item_id": earn["id"], "week_target": 1, "week_bonus": 9, "cap_period": "day", "cap_count": 1},
+        )
+        self.client.put(
+            f"/api/item-bindings/{source['id']}",
+            json={"bindings": [{"kind": "deduct", "item_id": deduct["id"], "enabled": False}]},
+        )
+        self.client.post("/api/auth/select-child", json={"child_id": first["id"]})
+        self.client.put(f"/api/item-rules/{first['id']}", json={"kind": "earn", "item_id": earn["id"], "week_target": 2})
+
+        response = self.client.post(
+            "/api/item-rules/copy",
+            json={"source_id": source["id"], "target_ids": [first["id"], second["id"]], "include_bindings": True},
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        for child in (first, second):
+            snapshot = data["item_rules"][str(child["id"])]["earn"][str(earn["id"])]
+            self.assertEqual((snapshot["week_target"], snapshot["week_bonus"], snapshot["cap_period"], snapshot["cap_count"]), (1, 9, "day", 1))
+            self.assertEqual(data["item_bindings"][str(child["id"])]["deduct"], [deduct["id"]])
+        # 快照自带锚点，抄过去就能按同一套规则结算。
+        self.assertTrue(data["item_rules"][str(second["id"])]["earn"][str(earn["id"])]["rule_set_at"])
+        self.client.delete(f"/api/items/earn/{earn['id']}")
+        self.client.delete(f"/api/items/deduct/{deduct['id']}")
+
+    def test_bulk_rule_copy_validates_every_target_before_writing(self):
+        source = self.create_child(username="kid-source")
+        target = self.create_child(username="kid-target")
+        item = self.client.post("/api/items/earn", json={"name": "原子复制", "points": 3}).get_json()
+        self.client.put(f"/api/item-rules/{source['id']}", json={"kind": "earn", "item_id": item["id"], "week_target": 1})
+
+        for payload, status, message in (
+            ({"source_id": source["id"], "target_ids": []}, 400, "请选择"),
+            ({"source_id": source["id"], "target_ids": [target["id"], target["id"]]}, 400, "重复"),
+            ({"source_id": source["id"], "target_ids": [source["id"]]}, 400, "来源不能"),
+            ({"source_id": source["id"] + 999, "target_ids": [target["id"]]}, 404, "来源孩子不存在"),
+            ({"source_id": source["id"], "target_ids": [target["id"], target["id"] + 999]}, 404, "目标孩子不存在"),
+        ):
+            response = self.client.post("/api/item-rules/copy", json=payload)
+            self.assertEqual(response.status_code, status, payload)
+            self.assertIn(message, response.get_json()["error"])
+
+        # 上面那批失败请求里，合法目标一笔都没落盘。
+        self.assertEqual(self.state()["item_rules"][str(target["id"])]["earn"], {})
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": target["username"], "password": "child123"})
+        response = self.client.post("/api/item-rules/copy", json={"source_id": source["id"], "target_ids": [target["id"]]})
+        self.assertEqual(response.status_code, 403)
+        self.client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
         self.client.delete(f"/api/items/earn/{item['id']}")
 
     def test_item_bindings_reject_the_whole_batch_when_one_entry_is_bad(self):
@@ -1601,7 +1721,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertTrue(all(row["closed"] for row in periods[1:]))
         self.assertEqual(self.client.get("/api/settlements/periods?unit=day").status_code, 400)
         self.assertEqual(self.client.get("/api/settlements/periods?unit=decade").status_code, 400)
-        # 「全部周期」 has no window to name, so it offers one catch-up entry and never claims a period is settled.
+        # 「全部周期」没有可命名的窗口，只给一条补结入口，也不会声称某一期已结算。
         all_periods = self.client.get("/api/settlements/periods?unit=all").get_json()["periods"]
         self.assertEqual([(row["start"], row["closed"], row["settled"]) for row in all_periods], [("", True, False)])
 
@@ -1619,6 +1739,29 @@ class PointsManagerApiTests(unittest.TestCase):
         self.client.post("/api/auth/login", json={"username": "child1", "password": "child123"})
         self.assertEqual(self.client.get("/api/settlements/periods?unit=week").status_code, 403)
         self.assertEqual(self.client.post("/api/settlements/run", json={"unit": "week"}).status_code, 403)
+
+    def test_settled_weeks_belong_to_the_child_whose_rule_settled_them(self):
+        day_child = self.create_child(username="kid-unit-day", display_name="按天")
+        week_child = self.create_child(username="kid-unit-week", display_name="按周")
+        item = self.client.post(
+            "/api/items/earn",
+            json={"name": "共用项目", "points": 2, "icon": "book.svg", "week_target": 1, "week_bonus": 3},
+        ).get_json()
+        self.client.put(
+            f"/api/item-rules/{day_child['id']}",
+            json={"kind": "earn", "item_id": item["id"], "week_target": 1, "week_bonus": 3, "target_unit": "day"},
+        )
+        self.backdate_rule(item["id"], self.monday(2), account_id=day_child["id"])
+        self.backdate_rule(item["id"], self.monday(2))
+        self.client.post("/api/auth/select-child", json={"child_id": day_child["id"]})
+        for _ in range(2):
+            self.assertEqual(self.submit_earn(item["id"], date=self.monday(1).isoformat()).status_code, 201)
+
+        with type(self).connection() as conn:
+            # 按天那孩子的日结水位正好落在周一，不能因此把按周那孩子的整周标成已结算。
+            self.assertIn(self.monday(1).isoformat(), self.app_module.settled_window_starts(conn, "day"))
+            self.assertNotIn(self.monday(1).isoformat(), self.app_module.settled_window_starts(conn, "week"))
+        self.client.delete(f"/api/items/earn/{item['id']}")
 
     def streak_records(self, source):
         return [row for row in self.state()["records"] if row["source"] == source]
@@ -1646,7 +1789,7 @@ class PointsManagerApiTests(unittest.TestCase):
                 201,
             )
 
-        # Each window was already graded by its own log, so the 「全部周期」 run only proves nothing pays twice.
+        # 每个窗口都已按自己的记录结算过，所以「全部周期」这一跑只证明没有重复发放。
         self.assertEqual(self.settle("all")["settlement"]["entries"], 0)
         self.assertEqual(
             [(row["week_start"], row["bonus"]) for row in self.settlement_rows(weekly["id"])],
@@ -1809,6 +1952,33 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(len(self.streak_records("target_streak")), 1)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
+    def test_target_streak_keeps_its_cadence_past_the_lookback(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        item = self.client.post(
+            "/api/items/earn",
+            json={
+                "name": "长链项目",
+                "points": 1,
+                "icon": "book.svg",
+                "week_target": 1,
+                "streak_weeks": 5,
+                "streak_bonus": 2,
+            },
+        ).get_json()
+        # 链长 20 周，比 12 周的回看长度还长：相位必须从规则起点数起。
+        self.backdate_rule(item["id"], self.monday(20))
+        for weeks_back in range(20, 0, -1):
+            self.grant(item["id"], weeks_back=weeks_back)
+        self.settle()
+
+        # 每个整 5 期的末尾发一次；回看只决定从哪一期开始写，不改动相位。
+        self.assertEqual(
+            sorted(row["date"] for row in self.streak_records("target_streak")),
+            [(self.monday(weeks) + timedelta(days=6)).isoformat() for weeks in (11, 6, 1)],
+        )
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
     def test_deduct_streak_charges_extra_penalty(self):
         child = self.create_child()
         self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
@@ -1887,6 +2057,26 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(payouts[0]["date"], app.period_end("month", app.period_shift("month", 1, this_month, -1)))
         self.client.delete(f"/api/items/deduct/{item['id']}")
 
+    def test_deduct_streak_keeps_its_cadence_past_the_lookback(self):
+        child = self.create_child()
+        self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+        item = self.client.post(
+            "/api/items/deduct",
+            json={"name": "长链迟到", "points": 1, "icon": "warning.svg", "streak_weeks": 5, "streak_bonus": 3},
+        ).get_json()
+        # 连续 20 周都迟到，链长超过 12 周的回看长度：扣分要照整条链的相位来。
+        self.backdate_rule(item["id"], self.monday(20), kind="deduct")
+        for weeks_back in range(20, 0, -1):
+            self.deduct_on(item["id"], self.monday(weeks_back) + timedelta(days=1))
+        self.settle()
+
+        # 每满 5 周扣一次，回看之前的整段只参与计数、不补发。
+        self.assertEqual(
+            sorted(row["date"] for row in self.streak_records("deduct_week_streak")),
+            [(self.monday(weeks) + timedelta(days=6)).isoformat() for weeks in (11, 6, 1)],
+        )
+        self.client.delete(f"/api/items/deduct/{item['id']}")
+
     def test_deduct_target_only_penalizes_above_the_cap(self):
         child = self.create_child()
         self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
@@ -1933,7 +2123,7 @@ class PointsManagerApiTests(unittest.TestCase):
             [("看电视 4/2", -6)],
         )
         self.assertEqual(settled["total_points"], -14)
-        # 重新核算 stays available for the same window and lands on the same answer.
+        # 同一期仍然可以重新核算，结果也落在同一个答案上。
         settled = self.settle("week", self.monday(1).isoformat(), force=True)
         charges = [row for row in settled["records"] if row["source"] == "over_cap_penalty"]
         self.assertEqual(
@@ -2009,6 +2199,33 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(len(self.settlement_rows(item["id"])), 1)
         settled = self.settle("all")
         self.assertEqual([row for row in settled["records"] if row["source"] == "weekly_bonus"], [])
+        self.client.delete(f"/api/items/earn/{item['id']}")
+
+    def test_unbinding_a_project_keeps_the_points_it_already_paid(self):
+        child = self.create_child(username="kid-unbind")
+        item = self.client.post(
+            "/api/items/earn",
+            json={"name": "解绑项目", "points": 5, "icon": "book.svg", "week_target": 2, "week_bonus": 4},
+        ).get_json()
+        self.backdate_rule(item["id"], self.monday(1))
+        self.grant(item["id"], weeks_back=1, times=3)
+        bonuses = [row for row in self.settle()["records"] if row["source"] == "weekly_bonus"]
+        self.assertEqual([row["amount"] for row in bonuses], [4])
+
+        # 解绑后项目退出结算集合；此后撤销一条记录只该撤它自己，不能把已发的奖励一起删掉。
+        self.assertEqual(
+            self.client.put(
+                f"/api/item-bindings/{child['id']}",
+                json={"bindings": [{"kind": "earn", "item_id": item["id"], "enabled": False}]},
+            ).status_code,
+            200,
+        )
+        logs = [row for row in self.state()["records"] if row["item_id"] == item["id"] and row["source"] == "earn"]
+        self.assertEqual(self.client.post(f"/api/transactions/{logs[0]['id']}/undo").status_code, 200)
+
+        kept = [row for row in self.state()["records"] if row["source"] == "weekly_bonus"]
+        self.assertEqual([row["amount"] for row in kept], [4])
+        self.assertEqual(self.state()["total_points"], 2 * 5 + 4)
         self.client.delete(f"/api/items/earn/{item['id']}")
 
     def test_earn_streak_award_and_fine_coexist(self):
@@ -2195,10 +2412,10 @@ class PointsManagerApiTests(unittest.TestCase):
         # 零分记录照样算完成，但只有结算出来的奖金才带积分。
         periods = self.client.get("/api/analytics?days=30").get_json()["item_periods"]
         earned = next(row for row in periods["items"]["earn"] if row["name"] == "计算题")
-        self.assertEqual((earned["measure"], earned["total"]["count"], earned["total"]["quantity"]), ("quantity", 2, 27))
-        self.assertEqual((earned["total"]["coins"], earned["total"]["payout"]), (0, 9))
-        # The 奖惩分 column is a sum: its detail lines are the settlements behind it.
         cell = next(cell for cell in earned["cells"] if cell and cell["detail"])
+        self.assertEqual((cell["measure"], earned["total"]["count"], earned["total"]["quantity"]), ("quantity", 2, 27))
+        self.assertEqual((earned["total"]["coins"], earned["total"]["payout"]), (0, 9))
+        # 奖惩分列是合计，下面的明细就是它背后的结算记录。
         self.assertEqual(
             [(row["title"], row["source"], row["amount"]) for row in cell["detail"]],
             [("计算题 27/10", "weekly_bonus", 9)],
@@ -2331,7 +2548,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(self.manual_entry(item_kind="earn", item_id=item["id"], date=day).status_code, 400)
         response = self.manual_entry(item_kind="earn", item_id=item["id"], quantity=12, date=day)
         self.assertEqual(response.status_code, 201)
-        # The 补录 itself is points-free; the closed window pays the 3 completion points, 2 over target is one short of every 5.
+        # 补录本身不带积分；闭合窗口发出 3 分完成奖励，超出目标 2 个还够不上每 5 个一档。
         self.assertEqual(
             [(row["title"], row["amount"], row["quantity"]) for row in self.manual_logs(response.get_json())],
             [("补录：错题整理", 0, 12)],
@@ -2360,7 +2577,7 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(settled["total_points"], 2)
         self.assertEqual(self.watermarks(item["id"]), [(self.monday(1).isoformat(), 0, 3)])
 
-        # A back-dated 补录 rewrites the window it joins: reaching target clears the fine that was already paid.
+        # 补录会改写它落入的那个窗口：达标之后，已经发过的罚款被收回。
         added = self.manual_entry(
             item_kind="earn", item_id=item["id"], date=(self.monday(1) + timedelta(days=3)).isoformat()
         )
@@ -2370,13 +2587,13 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(self.watermarks(item["id"]), [])
         self.assertEqual(settled["total_points"], 10)
 
-        # Undoing that 补录 drops the tally back under target, so the fine comes back.
+        # 撤销这笔补录后计数又跌回目标以下，罚款随之回来。
         undone = self.client.post(f"/api/transactions/{added.get_json()['record_id']}/undo")
         self.assertEqual(undone.status_code, 200)
         self.assertEqual([row["penalty"] for row in self.settlement_rows(item["id"])], [3])
         self.assertEqual(self.state()["total_points"], 2)
 
-        # A second 补录 clears the fine by itself again, so 重新核算 only repeats the same answer.
+        # 再补一笔又会自己清掉罚款，所以重新核算只是重复同一个答案。
         self.assertEqual(
             self.manual_entry(
                 item_kind="earn", item_id=item["id"], date=(self.monday(1) + timedelta(days=4)).isoformat()
@@ -2711,13 +2928,15 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(daily["unit"], "day")
         self.assertEqual(daily["periods"][-1]["label"], today)
         rows = [item for item in daily["items"]["earn"] if item["name"] == "完成作业"]
-        # 这张表一行一个孩子，同一个项目不会把两个孩子的积分并在一起。
+        # 这张表一行一个项目、一列一个孩子：同一个项目不会拆成两行，也不会把两个孩子的积分并在一起。
+        self.assertEqual(len(rows), 1)
+        columns = [child["id"] for child in daily["children"]]
+        cells = {columns[index]: cell for index, cell in enumerate(rows[0]["cells"])}
         self.assertEqual(
-            [(row["account_id"], row["measure"], row["total"]["count"], row["total"]["coins"]) for row in rows],
-            [(first["id"], "count", 1, 10), (second["id"], "count", 1, 10)],
+            [(cells[first["id"]]["measure"], cells[first["id"]]["count"], cells[first["id"]]["coins"]),
+             (cells[second["id"]]["measure"], cells[second["id"]]["count"], cells[second["id"]]["coins"])],
+            [("count", 1, 10), ("count", 1, 10)],
         )
-        self.assertEqual([row["cells"][-1]["count"] for row in rows], [1, 1])
-        self.assertEqual([row["cells"][:-1] for row in rows], [[None, None], [None, None]])
         self.assertEqual(self.client.get("/api/analytics?days=7&unit=hour").status_code, 400)
         self.assertEqual(self.client.get("/api/analytics?days=7&periods=0").status_code, 400)
 
@@ -2735,13 +2954,14 @@ class PointsManagerApiTests(unittest.TestCase):
 
     def test_target_sheet_exports_workbook(self):
         sheet_namespace = "{%s}" % self.app_module.SHEET_NS
+        long_rule = "每次+5 · 每周3次 · 超额每次+1 · 未达标-2 · 连续2期达标额外+3"
         payload = {
             "unit": "week",
             "date": date.today().isoformat(),
             "range": "本周 10/19 ~ 10/25",
-            "heads": [["项目", "目标", "一", "二"], ["", "", "10/19", "10/20"]],
+            "heads": [["项目", "规则", "一", "二"], ["", "", "10/19", "10/20"]],
             "sheets": [
-                {"name": "小明[测*试:?]", "rows": [["阅读", "每周3次"], ["口算", "每周10次"]]},
+                {"name": "小明[测*试:?]", "rows": [["阅读", long_rule], ["口算", "每周10次"]]},
                 {"name": "小明[测*试:?]", "rows": [["阅读", "每周3次"]]},
             ],
         }
@@ -2765,11 +2985,13 @@ class PointsManagerApiTests(unittest.TestCase):
         self.assertEqual(len(list(sheet.iter(sheet_namespace + "row"))), 5)
         self.assertEqual([element.get("ref") for element in sheet.iter(sheet_namespace + "mergeCell")], ["A1:D1"])
         self.assertEqual(next(sheet.iter(sheet_namespace + "pageSetup")).get("orientation"), "landscape")
-        self.assertIn("每周3次", [element.text for element in sheet.iter(sheet_namespace + "t")])
+        self.assertIn("每周10次", [element.text for element in sheet.iter(sheet_namespace + "t")])
+        # 规则列不再是 24 字的短摘要，长规则整句写进工作簿。
+        self.assertIn(long_rule, [element.text for element in sheet.iter(sheet_namespace + "t")])
         boxes = list(sheet.iter(sheet_namespace + "row"))[3]
         self.assertEqual(len(boxes.findall(sheet_namespace + "c")), 4)
 
-        wide = dict(payload, heads=[["项目", "目标"] + [str(step) for step in range(200)], ["", ""] + [str(step) for step in range(200)]])
+        wide = dict(payload, heads=[["项目", "规则"] + [str(step) for step in range(200)], ["", ""] + [str(step) for step in range(200)]])
         wide_sheet = ElementTree.fromstring(zipfile.ZipFile(io.BytesIO(self.client.post("/api/targets/export", json=wide).data)).read("xl/worksheets/sheet1.xml"))
         wide_head = list(wide_sheet.iter(sheet_namespace + "row"))[1]
         self.assertEqual(len(wide_head.findall(sheet_namespace + "c")), self.app_module.TARGET_SHEET_MAX_COLUMNS)
@@ -2797,7 +3019,7 @@ class PointsManagerApiTests(unittest.TestCase):
             "unit": "week",
             "date": date.today().isoformat(),
             "range": "本周 10/19 ~ 10/25",
-            "heads": [["项目", "目标", "一"], ["", "", "10/19"]],
+            "heads": [["项目", "规则", "一"], ["", "", "10/19"]],
             "sheets": [{"name": "小明", "rows": [[long_name, "每周数量10次"], ["口算", "每天1次"]]}],
         }
         archive = zipfile.ZipFile(io.BytesIO(self.client.post("/api/targets/export", json=payload).data))
@@ -2806,6 +3028,7 @@ class PointsManagerApiTests(unittest.TestCase):
         heights = {element.get("r"): float(element.get("ht")) for element in sheet.iter(sheet_namespace + "row") if element.get("ht")}
 
         self.assertEqual(widths["1"], self.app_module.XLSX_NAME_BOUNDS[1])
+        self.assertEqual(widths["2"], self.app_module.XLSX_RULE_BOUNDS[0])
         self.assertGreaterEqual(widths["3"], self.app_module.xlsx_display_width("10/19"))
         self.assertGreater(heights["4"], heights["5"])
         self.assertEqual(next(sheet.iter(sheet_namespace + "tabColor")).get("rgb"), "FF24A37B")
@@ -2889,7 +3112,7 @@ class PointsManagerApiTests(unittest.TestCase):
             "unit": "week",
             "date": date.today().isoformat(),
             "range": "本周 10/19 ~ 10/25",
-            "heads": [["项目", "目标", "一", "二"], ["", "", "10/19", "10/20"]],
+            "heads": [["项目", "规则", "一", "二"], ["", "", "10/19", "10/20"]],
             "sheets": [
                 {
                     "name": "小明",
@@ -2920,7 +3143,7 @@ class PointsManagerApiTests(unittest.TestCase):
             "unit": "week",
             "date": date.today().isoformat(),
             "range": "本周 \x0b10/19 ~ 10/25",
-            "heads": [["项目\x02", "目标", "一"], ["", "", "10/19"]],
+            "heads": [["项目\x02", "规则", "一"], ["", "", "10/19"]],
             "sheets": [{"name": "小明\x07", "rows": [["阅读\x00", "每周3次"]]}],
         }
         response = self.client.post("/api/targets/export", json=payload)
@@ -2940,6 +3163,8 @@ class PointsManagerApiTests(unittest.TestCase):
         for payload, hint in (
             ({"kind": "earn", "name": "整理房间", "item_id": "abc"}, "项目"),
             ({"kind": "earn", "name": "整理房间", "points": 10 ** 30}, "积分"),
+            # JSON 的 1e999 会解析成 inf，int(inf) 抛的是 OverflowError。
+            ({"kind": "earn", "name": "整理房间", "points": float("inf")}, "积分"),
             ({"kind": "exchange", "reward_id": 10 ** 30}, "项目"),
         ):
             response = self.client.post("/api/transactions", json=payload)
@@ -2967,11 +3192,43 @@ class PointsManagerApiTests(unittest.TestCase):
         self.client.post("/api/transactions", json={"kind": "earn", "points": 12, "name": "整理房间"})
         self.client.post("/api/transactions", json={"kind": "deduct", "points": 4, "name": "迟到"})
         flow = self.state()["recent_flow"]
-        self.assertEqual(flow["gained"], 12)
-        self.assertEqual(flow["lost"], 4)
+        self.assertEqual(flow["gained_total"], 12)
+        self.assertEqual(flow["lost_total"], 4)
         self.assertEqual(flow["net"], 8)
-        self.assertEqual(flow["top_gained"][0]["name"], "整理房间")
-        self.assertEqual(flow["top_lost"][0]["name"], "迟到")
+        self.assertEqual([row["name"] for row in flow["gained_items"]], ["整理房间"])
+        self.assertEqual([row["name"] for row in flow["lost_items"]], ["迟到"])
+        self.assertEqual(flow["gained_items"][0]["children"][str(child["id"])], {"count": 1, "total": 12})
+        self.assertEqual(flow["lost_items"][0]["children"][str(child["id"])], {"count": 1, "total": -4})
+
+    def test_recent_flow_columns_follow_the_viewer(self):
+        first = self.create_child(username="kid-flow-a", display_name="甲")
+        second = self.create_child(username="kid-flow-b", display_name="乙")
+        item = self.create_item("earn", "共同项目", 2)
+        for child in (first, second):
+            self.client.post("/api/auth/select-child", json={"child_id": child["id"]})
+            self.client.post("/api/transactions", json={"kind": "earn", "item_id": item})
+        flow = self.state()["recent_flow"]
+        self.assertEqual([row["id"] for row in flow["children"]], [first["id"], second["id"]])
+        row = next(item for item in flow["gained_items"] if item["name"] == "共同项目")
+        self.assertEqual(row["children"][str(first["id"])]["total"], 2)
+        self.assertEqual(row["children"][str(second["id"])]["total"], 2)
+
+        # 孩子账号只看自己那一列，不能从首页看到兄弟姐妹的明细。
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": "kid-flow-a", "password": "child123"})
+        own = self.state()["recent_flow"]
+        self.assertEqual([row["id"] for row in own["children"]], [first["id"]])
+        own_row = next(item for item in own["gained_items"] if item["name"] == "共同项目")
+        self.assertEqual(list(own_row["children"]), [str(first["id"])])
+
+    def test_child_state_hides_sibling_accounts(self):
+        self.create_child(username="kid-state-a", display_name="甲")
+        self.create_child(username="kid-state-b", display_name="乙")
+        self.client.post("/api/auth/logout")
+        self.client.post("/api/auth/login", json={"username": "kid-state-a", "password": "child123"})
+
+        # 孩子账号不需要知道兄弟姐妹的账号资料，账号列表只留给管理员。
+        self.assertEqual(self.state()["children"], [])
 
     def test_custom_image_routes_find_uploaded_assets(self):
         for asset in ("child-boy", "child-girl", "adult-male", "adult-female"):

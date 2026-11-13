@@ -139,6 +139,8 @@ TARGET_STREAK_SOURCE = "target_streak"
 TARGET_STREAK_PENALTY_SOURCE = "target_streak_penalty"
 ANALYTICS_MAX_DAYS = 365
 RECENT_WINDOW_DAYS = 7
+# 首页只留家庭里最活跃的几行，项目多了不把总览撑成一张长表。
+RECENT_FLOW_ROWS = 5
 ITEM_PERIOD_UNIT = "week"
 ITEM_PERIOD_COUNT = 8
 ITEM_PERIOD_MAX = 31
@@ -146,6 +148,9 @@ TARGET_SHEET_UNITS = ("week", "month", "quarter")
 TARGET_SHEET_MAX_CHILDREN = 12
 TARGET_SHEET_MAX_ROWS = 60
 TARGET_SHEET_MAX_COLUMNS = 64
+TARGET_SHEET_MAX_NAME = 40
+TARGET_SHEET_MAX_CELL = 12
+TARGET_SHEET_MAX_RULE = 200
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # 所有结算路径共用同一份回看长度：手动结算列出的期次，正好是引擎地板还够得到的那些。
 SETTLE_LOOKBACK_PERIODS = {"day": 84, "week": 12, "month": 12, "quarter": 4, "year": 2}
@@ -896,7 +901,8 @@ INT_FIELD_LIMIT = 2 ** 63 - 1
 def int_field(value: Any, label: str) -> int:
     try:
         number = int(value)
-    except (TypeError, ValueError) as exc:
+    # JSON 的 1e999 会先变成 inf，int(inf) 抛的是 OverflowError 而不是 ValueError。
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{label}必须是整数") from exc
     if abs(number) > INT_FIELD_LIMIT:
         raise ValueError(f"{label}超出可填写范围")
@@ -1140,30 +1146,25 @@ def active_child_id(conn: sqlite3.Connection, user: sqlite3.Row) -> int | None:
     return fallback
 
 
-def require_user(handler):
-    @wraps(handler)
-    def wrapped(*args, **kwargs):
-        with connection() as conn:
-            user = current_user(conn)
-            if user is None:
-                return api_error("请先登录", 401)
-        return handler(*args, **kwargs)
+def require_role(role: str | None = None):
+    def decorator(handler):
+        @wraps(handler)
+        def wrapped(*args, **kwargs):
+            with connection() as conn:
+                user = current_user(conn)
+                if user is None:
+                    return api_error("请先登录", 401)
+                if role is not None and user["role"] != role:
+                    return api_error("只有管理员可以执行此操作", 403)
+            return handler(*args, **kwargs)
 
-    return wrapped
+        return wrapped
+
+    return decorator
 
 
-def require_admin(handler):
-    @wraps(handler)
-    def wrapped(*args, **kwargs):
-        with connection() as conn:
-            user = current_user(conn)
-            if user is None:
-                return api_error("请先登录", 401)
-            if user["role"] != "admin":
-                return api_error("只有管理员可以执行此操作", 403)
-        return handler(*args, **kwargs)
-
-    return wrapped
+require_user = require_role()
+require_admin = require_role("admin")
 
 
 def row_item(row: sqlite3.Row, kind: str) -> dict[str, Any]:
@@ -1333,6 +1334,44 @@ def set_item_binding(conn: sqlite3.Connection, kind: str, item_id: int, account_
     )
 
 
+def copy_item_bindings(conn: sqlite3.Connection, source_id: int | None, target_id: int) -> None:
+    """整套可见范围：来源没有排除的项目，接收孩子也全都可见。"""
+    conn.execute("DELETE FROM item_bindings WHERE account_id = ?", (target_id,))
+    if source_id is None:
+        return
+    conn.execute(
+        """
+        INSERT INTO item_bindings(item_kind, item_id, account_id, enabled, updated_at)
+        SELECT item_kind, item_id, ?, 0, ? FROM item_bindings WHERE account_id = ? AND enabled = 0
+        """,
+        (target_id, now_iso(), source_id),
+    )
+
+
+def save_item_rule(
+    conn: sqlite3.Connection,
+    kind: str,
+    item_id: int,
+    account_id: int,
+    rule: dict[str, Any],
+    base: sqlite3.Row | dict[str, Any],
+) -> None:
+    """把一份校验过的规则存成孩子的快照；内容没变就沿用 base 的锚点。"""
+    changed = any(base[column] != value for column, value in rule.items() if column in RULE_ANCHOR_FIELDS)
+    anchor = base["rule_set_at"] if base["rule_set_at"] and not changed else now_iso()
+    columns = ", ".join(rule)
+    conn.execute(
+        f"""
+        INSERT INTO item_rule_overrides(item_kind, item_id, account_id, {columns}, rule_set_at, updated_at)
+        VALUES (?, ?, ?, {", ".join("?" * len(rule))}, ?, ?)
+        ON CONFLICT(item_kind, item_id, account_id) DO UPDATE SET
+            {", ".join(f"{column} = excluded.{column}" for column in rule)},
+            rule_set_at = excluded.rule_set_at, updated_at = excluded.updated_at
+        """,
+        [kind, item_id, account_id, *rule.values(), anchor, now_iso()],
+    )
+
+
 def reorder_items(conn: sqlite3.Connection, kind: str, ids: list[int]) -> None:
     """保存拖拽后的顺序；请求里没列出的 id 保持相对顺序排在最后。"""
     table = ITEM_TABLES[kind]
@@ -1413,6 +1452,12 @@ def target_lookback_steps(unit: str, every: int) -> int:
     return max(2, -(-SETTLE_LOOKBACK_PERIODS[unit] // every))
 
 
+def lookback_floor(unit: str, every: int, today: str) -> str:
+    """回看长度还够得着的最早窗口起点。"""
+    current = period_start(unit, today, every)
+    return period_shift(unit, every, current, -target_lookback_steps(unit, every))
+
+
 def period_label(unit: str, start: str) -> str:
     """期次区间：周只看首尾两天就认得出来，月/季/年的回看会绕回同一个月份，所以必须带年份。"""
     day = date.fromisoformat(start)
@@ -1424,15 +1469,20 @@ def period_label(unit: str, start: str) -> str:
 
 
 def settled_window_starts(conn: sqlite3.Connection, unit: str) -> set[str]:
-    """这个单位已经判定过的期次。按天的规则共用水位表，所以由项目自己的目标单位决定。"""
-    units: dict[tuple[str, int], set[str]] = {}
-    for account_id in child_account_ids(conn):
-        for kind, item in rule_items(conn, account_id):
-            units.setdefault((kind, int(item["id"])), set()).add(item_target(item)[0])
+    """这个单位已经判定过的期次。按天的规则共用水位表，所以由项目自己的目标单位决定。
+
+    水位行属于某个孩子：同一个项目在 A 身上按天结算、在 B 身上按周结算时，
+    A 的周一那行不能把 B 的整周标成已结算。
+    """
+    units = {
+        (account_id, kind, int(item["id"])): item_target(item)[0]
+        for account_id in child_account_ids(conn)
+        for kind, item in rule_items(conn, account_id)
+    }
     return {
         row["week_start"]
-        for row in conn.execute("SELECT item_kind, item_id, week_start FROM weekly_settlements")
-        if unit in units.get((row["item_kind"], int(row["item_id"])), set())
+        for row in conn.execute("SELECT account_id, item_kind, item_id, week_start FROM weekly_settlements")
+        if units.get((int(row["account_id"]), row["item_kind"], int(row["item_id"]))) == unit
     }
 
 
@@ -1668,8 +1718,7 @@ def full_window_start(unit: str, every: int, anchor: str) -> str:
 def item_window_floor(item: sqlite3.Row | dict[str, Any], today: str) -> str:
     """惰性结算能判定的最早窗口：受回看长度约束，且绝不早于项目自己的规则。"""
     unit, every = item_target(item)
-    current = period_start(unit, today, every)
-    floor = period_shift(unit, every, current, -target_lookback_steps(unit, every))
+    floor = lookback_floor(unit, every, today)
     anchor = str(item["rule_set_at"] or "")[:10]
     return max(floor, full_window_start(unit, every, anchor)) if anchor else floor
 
@@ -1713,7 +1762,10 @@ def settled_floor(
 def settlement_families(item: dict[str, Any], kind: str, today: str) -> list[tuple[str, int, tuple[str, ...], str, bool]]:
     """这个项目会结算的窗口族：(单位, 长度, source, 最早可重算, 是否拥有水位行)。"""
     unit, every = item_target(item)
-    families = [(unit, every, TARGET_WINDOW_SOURCES[kind], item_window_floor(item, today), True)]
+    families = []
+    # 目标清零就没有重算者了，此时删掉已发放的记录等于把积分凭空抹掉。
+    if target_rule_active(item, kind):
+        families.append((unit, every, TARGET_WINDOW_SOURCES[kind], item_window_floor(item, today), True))
     if kind == "deduct" and int(item["streak_weeks"] or 0) and int(item["streak_bonus"] or 0):
         streak_unit = item["streak_unit"]
         start = streak_start(streak_unit, today, item["rule_set_at"])
@@ -1737,6 +1789,9 @@ def resettle_item_windows(
         return ()
     item = effective_item(conn, kind, row, account_id)
     item_id = int(item["id"])
+    # 解绑的孩子不再参与这个项目的结算，尾巴删掉就没人重结了。
+    if item_id in excluded_item_ids(conn, kind, account_id):
+        return ()
     cleared: list[str] = []
     for family_unit, every, sources, floor, audited in settlement_families(item, kind, current_date()):
         if unit and family_unit != unit:
@@ -1766,8 +1821,8 @@ def regrade_after_log(
     """从这条记录的日期起清掉该项目的所有窗口并重算，让调用方自己的应答就是最新的。"""
     units = resettle_item_windows(conn, account_id, kind, item_id, log_date)
     if units:
-        settle_target_rules(conn, [account_id], units, log_date, int(item_id))
-        settle_streaks(conn, [account_id], units, log_date, int(item_id))
+        settle_target_rules(conn, [account_id], units, log_date, kind, int(item_id))
+        settle_streaks(conn, [account_id], units, log_date, kind, int(item_id))
 
 
 def regrade_windows(conn: sqlite3.Connection, account_ids: list[int], unit: str, since: str) -> None:
@@ -1865,7 +1920,7 @@ def settle_earn_streak(
     per_date: dict[str, list[int]],
     windows: list[str],
     timestamp: str,
-    only_from: str = "",
+    write_from: str = "",
 ) -> None:
     """奖励链按连续达标的整段发放，每满一段发一次；罚分链按连续未达标发放，每漏一段扣一次。"""
     chains = (
@@ -1875,7 +1930,7 @@ def settle_earn_streak(
     item_id = int(item["id"])
     unit, every = item_target(item)
     # 就算只发尾巴那一段，段数也要按整条链来数，所以这个过滤条件要落在写入上。
-    only_from = period_start(unit, only_from, every) if only_from else ""
+    write_from = period_start(unit, write_from, every) if write_from else ""
     quota = int(item["week_target"])
     for target, amount, source in chains:
         if not target or not amount:
@@ -1884,7 +1939,7 @@ def settle_earn_streak(
         run = 0
         for start in windows:
             run = run + 1 if (window_count(item, per_date, start) >= quota) == on_target else 0
-            if not run or run % target or start < only_from:
+            if not run or run % target or start < write_from:
                 continue
             settle_date = period_end(unit, start, every)
             add_settlement_record(
@@ -1900,9 +1955,9 @@ def settle_earn_streak(
             )
 
 
-def settles_item(item: dict[str, Any], only_item_id: int | None) -> bool:
-    """这一趟遍历是否覆盖这个项目：某条记录的重算只点名自己那个项目，别的项目不受影响。"""
-    return only_item_id is None or int(item["id"]) == only_item_id
+def settles_item(item: dict[str, Any], kind: str, only_kind: str | None, only_item_id: int | None) -> bool:
+    """这一趟遍历是否覆盖这个项目：重算只点名自己那个项目，另一张表里碰巧同 id 的项目不跟。"""
+    return only_item_id is None or (kind == only_kind and int(item["id"]) == only_item_id)
 
 
 def settle_target_rules(
@@ -1910,21 +1965,26 @@ def settle_target_rules(
     account_ids: list[int],
     units: tuple[str, ...] = RULE_UNITS,
     only_from: str = "",
+    only_kind: str | None = None,
     only_item_id: int | None = None,
 ) -> None:
     """两个计分方向的目标窗口惰性结算：逐孩子进行，且只算他们绑定的项目。"""
     if not account_ids:
         return
     today = current_date()
-    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    timestamp = now_iso()
     for raw_account_id in account_ids:
         account_id = int(raw_account_id)
         # 规则逐孩子读取，所以同一个项目可以只为某一个孩子在某个窗口结算。
         plans = []
         for kind, item in rule_items(conn, account_id):
             unit, every = item_target(item)
-            if unit not in units or not settles_item(item, only_item_id):
+            if unit not in units or not settles_item(item, kind, only_kind, only_item_id):
                 continue
+            has_streak = kind == "earn" and (
+                (int(item["streak_weeks"] or 0) and int(item["streak_bonus"] or 0))
+                or (int(item["streak_penalty_weeks"] or 0) and int(item["streak_penalty"] or 0))
+            )
             plans.append(
                 (
                     kind,
@@ -1934,15 +1994,16 @@ def settle_target_rules(
                     period_start(unit, today, every),
                     item_window_floor(item, today),
                     period_start(unit, only_from, every) if only_from else "",
+                    streak_origin(unit, every, today, item["rule_set_at"]) if has_streak else "",
                 )
             )
         if not plans:
             continue
         kinds = {plan[0] for plan in plans}
-        since = min(plan[5] for plan in plans)
+        since = min([plan[5] for plan in plans] + [plan[7] for plan in plans if plan[7]])
         counts = {kind: completion_counts(conn, account_id, kind, since) for kind in kinds}
         blocked = {kind: excluded_item_ids(conn, kind, account_id) for kind in kinds}
-        for kind, item, unit, every, current, floor, from_start in plans:
+        for kind, item, unit, every, current, floor, from_start, origin in plans:
             item_id = int(item["id"])
             per_date = counts[kind].get(item_id) or {}
             # 孩子从没记录过的项目，既没有可奖励的也没有可罚的。
@@ -1950,8 +2011,7 @@ def settle_target_rules(
                 continue
             first = max(floor, period_start(unit, min(per_date), every))
             windows = list(period_range(unit, first, current, every))
-            # 连续链依旧从整个回看区间开始数，但钱只落在项目最新标记之后，
-            # 所以常规遍历不会重发已经判定过的窗口；某条记录自己的重算会先清掉这些标记。
+            # 钱只落在项目最新标记之后（常规遍历不重发已判定窗口），某条记录自己的重算会先清掉这些标记。
             write_from = max(
                 from_start,
                 settled_floor(conn, account_id, kind, item_id, unit, every, TARGET_WINDOW_SOURCES[kind], True),
@@ -1959,15 +2019,29 @@ def settle_target_rules(
             for start in windows:
                 if start >= write_from:
                     settle_target_window(conn, account_id, kind, item, per_date, start, timestamp)
-            if kind == "earn":
-                settle_earn_streak(conn, account_id, item, per_date, windows, timestamp, write_from)
+            if origin:
+                # 连续链从规则起点数（相位才对），但写入仍从回看地板起：不补发远古的奖。
+                streak_windows = list(period_range(unit, origin, current, every))
+                settle_earn_streak(
+                    conn, account_id, item, per_date, streak_windows, timestamp, max(write_from, floor)
+                )
+
+
+def streak_origin(unit: str, every: int, today: str, rule_set_at: str | None) -> str:
+    """连续链真正的起点：规则设定的第一个完整窗口；没有锚点的老数据退回回看下界。
+
+    链长决定「每满 N 期」落在哪一期，所以必须从规则起点数起——只数回看窗口会
+    在链长超过回看长度时把 run 卡死，模出来的相位也跟着错。
+    """
+    anchor = str(rule_set_at or "")[:10]
+    if anchor:
+        return full_window_start(unit, every, anchor)
+    return lookback_floor(unit, every, today)
 
 
 def streak_start(unit: str, today: str, rule_set_at: str | None) -> str:
-    """连续规则还会判定的最早窗口：有界的回看，且绝不越过规则设定日。"""
-    start = period_shift(unit, 1, period_start(unit, today), -SETTLE_LOOKBACK_PERIODS[unit])
-    anchor = str(rule_set_at or "")[:10]
-    return max(start, full_window_start(unit, 1, anchor)) if anchor else start
+    """连续规则还能被重算的最早窗口：回看下界与规则起点取晚的那个。"""
+    return max(lookback_floor(unit, 1, today), streak_origin(unit, 1, today, rule_set_at))
 
 
 def streak_rule_items(conn: sqlite3.Connection, account_id: int | None = None) -> list[dict[str, Any]]:
@@ -1984,23 +2058,26 @@ def settle_streaks(
     account_ids: list[int],
     units: tuple[str, ...] = RULE_UNITS,
     only_from: str = "",
+    only_kind: str | None = None,
     only_item_id: int | None = None,
 ) -> None:
     """扣分项目每连续 N 个周期被打分，就额外多扣一次。"""
     if not account_ids:
         return
     today = current_date()
-    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    timestamp = now_iso()
     for raw_account_id in account_ids:
         account_id = int(raw_account_id)
         items = [
             item
             for item in streak_rule_items(conn, account_id)
-            if item["streak_unit"] in units and settles_item(item, only_item_id)
+            if item["streak_unit"] in units and settles_item(item, "deduct", only_kind, only_item_id)
         ]
         if not items:
             continue
-        starts = {int(item["id"]): streak_start(item["streak_unit"], today, item["rule_set_at"]) for item in items}
+        starts = {
+            int(item["id"]): streak_origin(item["streak_unit"], 1, today, item["rule_set_at"]) for item in items
+        }
         since = min(starts.values())
         blocked = excluded_item_ids(conn, "deduct", account_id)
         scored = deduct_completion_dates(conn, account_id, since)
@@ -2013,6 +2090,8 @@ def settle_streaks(
             start = starts[item_id]
             from_start = max(
                 period_start(unit, only_from) if only_from else "",
+                # 链从规则起点数，写入只落在回看地板之后，不补发远古的罚款。
+                lookback_floor(unit, 1, today),
                 settled_floor(conn, account_id, "deduct", item_id, unit, 1, (DEDUCT_STREAK_SOURCES[unit],), False),
             )
             periods = {period_start(unit, day) for day in dates}
@@ -2184,16 +2263,22 @@ def flow_groups(conn: sqlite3.Connection, account_ids: list[int], start_date: st
 
 
 def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: str, period_count: int) -> dict[str, Any]:
-    """近 N 个窗口里，每个孩子 × 加/扣分项目一行：记录了多少天，并把积分拆成完成与结算两部分。"""
+    """近 N 个窗口里，每个加/扣分项目一行、每个孩子一列：完成量与积分都按窗口合计。"""
     current = period_start(unit, current_date())
-    periods = []
-    start = period_shift(unit, 1, current, 1 - period_count)
-    while start <= current:
-        periods.append({"start": start, "end": period_end(unit, start), "label": period_label(unit, start)})
-        start = period_shift(unit, 1, start, 1)
-    window_of = {entry["start"]: position for position, entry in enumerate(periods)}
+    first = period_shift(unit, 1, current, 1 - period_count)
+    periods = [
+        {"start": start, "end": period_end(unit, start), "label": period_label(unit, start)}
+        for start in period_range(unit, first, period_shift(unit, 1, current, 1))
+    ]
     other: dict[str, int] = {"count": 0, "gained": 0, "lost": 0}
-    result: dict[str, Any] = {"unit": unit, "periods": periods, "items": {"earn": [], "deduct": []}, "other": other}
+    children = scope_children(conn, account_ids)
+    result: dict[str, Any] = {
+        "unit": unit,
+        "periods": periods,
+        "children": children,
+        "items": {"earn": [], "deduct": []},
+        "other": other,
+    }
     if not account_ids:
         return result
     marks = ",".join("?" * len(account_ids))
@@ -2204,7 +2289,10 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
         # 只有加分项目带数量口径；扣分项目一律按次数统计。
         measure = "target_measure" if kind == "earn" else "NULL AS target_measure"
         items_of[kind] = [
-            dict(row) for row in conn.execute(f"SELECT id, name, {measure} FROM {ITEM_TABLES[kind]}").fetchall()
+            dict(row)
+            for row in conn.execute(
+                f"SELECT id, name, {measure}, count_days_once FROM {ITEM_TABLES[kind]}"
+            ).fetchall()
         ]
     library: dict[tuple[int, str], dict[int, dict[str, Any]]] = {}
     for raw_scope_id in account_ids:
@@ -2215,12 +2303,10 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
                 int(row["id"]): apply_rule_override(dict(row), overrides.get((kind, int(row["id"]))))
                 for row in rows
             }
+    column_of = {int(child["id"]): position for position, child in enumerate(children)}
     entries: dict[tuple[str, int, int], dict[str, Any]] = {}
 
-    def tally_for(kind: str, row: sqlite3.Row) -> dict[str, int] | None:
-        position = window_of.get(period_start(unit, row["date"]))
-        if position is None:
-            return None
+    def cell_for(kind: str, row: sqlite3.Row) -> dict[str, Any]:
         account_id = int(row["account_id"])
         item_id = int(row["item_id"])
         key = (kind, account_id, item_id)
@@ -2233,37 +2319,49 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
                 "item_id": item_id,
                 "name": item["name"] if item else str(row["title"]),
                 "measure": "quantity" if item and str(item["target_measure"] or "count") == "quantity" else "count",
-                "cells": [None] * len(periods),
+                "days_once": int(item["count_days_once"] or 0) if item else 0,
+                "days": set(),
+                "count": 0,
+                "quantity": 0,
+                "coins": 0,
+                "payout": 0,
+                "detail": [],
             }
-        tally = entry["cells"][position]
-        if tally is None:
-            tally = entry["cells"][position] = {"count": 0, "quantity": 0, "coins": 0, "payout": 0, "detail": []}
-        return tally
+        return entry
 
     for kind in ITEM_KINDS:
         for row in conn.execute(
             f"SELECT account_id, item_id, title, date, amount, quantity FROM records WHERE {COMPLETION_FILTERS[kind]} AND {where}",
             params,
         ).fetchall():
-            tally = tally_for(kind, row)
-            if tally is None:
-                continue
-            tally["count"] += 1
-            tally["quantity"] += int(row["quantity"] or 0)
-            tally["coins"] += int(row["amount"])
-    # 结算记录挂在同一个项目上，所以它们的积分单独占一列，不掺进完成所得里。
+            entry = cell_for(kind, row)
+            entry["count"] += 1
+            entry["days"].add(str(row["date"])[:10])
+            entry["quantity"] += int(row["quantity"] or 0)
+            entry["coins"] += int(row["amount"])
+    # 结算记录挂在同一个项目上，所以它们的积分单独累计，不掺进完成所得里。
     for row in conn.execute(
         f"""
         SELECT account_id, item_kind, item_id, title, date, amount, source FROM records
         WHERE {where} AND item_kind IN ('earn', 'deduct') AND item_id IS NOT NULL AND {SETTLEMENT_SOURCE_PREDICATE}
+        ORDER BY date, id
         """,
         params,
     ).fetchall():
-        tally = tally_for(row["item_kind"], row)
-        if tally is None:
-            continue
-        tally["payout"] += int(row["amount"])
-        tally["detail"].append({"title": str(row["title"]), "amount": int(row["amount"]), "source": str(row["source"])})
+        entry = cell_for(row["item_kind"], row)
+        entry["payout"] += int(row["amount"])
+        entry["detail"].append(
+            {
+                "title": str(row["title"]),
+                "amount": int(row["amount"]),
+                "source": str(row["source"]),
+                "start": period_start(unit, row["date"]),
+            }
+        )
+    # 「同一天多次只算 1 次」的项目按窗口里的不同天数计，与 completion_count() 同一口径。
+    for entry in entries.values():
+        if entry["measure"] == "count" and entry["days_once"]:
+            entry["count"] = len(entry["days"])
 
     for row in conn.execute(
         f"""
@@ -2278,21 +2376,31 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
         other["lost"] += -amount if amount < 0 else 0
 
     def rows_of(kind: str) -> list[dict[str, Any]]:
-        found = []
+        grouped: dict[int, dict[str, Any]] = {}
         for entry in entries.values():
             if entry["kind"] != kind:
                 continue
-            totals = {key: 0 for key in ("count", "quantity", "coins", "payout")}
-            for tally in entry["cells"]:
-                if not tally:
-                    continue
-                for key in totals:
-                    totals[key] += tally[key]
-            found.append({**entry, "total": totals})
-        # 先按孩子排，再按分值排：家长是一张表按孩子逐个读的。
+            position = column_of.get(entry["account_id"])
+            if position is None:
+                continue
+            row = grouped.get(entry["item_id"])
+            if row is None:
+                row = grouped[entry["item_id"]] = {
+                    "kind": kind,
+                    "item_id": entry["item_id"],
+                    "name": entry["name"],
+                    "cells": [None] * len(children),
+                    "total": {"count": 0, "quantity": 0, "coins": 0, "payout": 0},
+                }
+            row["cells"][position] = {
+                key: entry[key] for key in ("measure", "count", "quantity", "coins", "payout", "detail")
+            }
+            for key in row["total"]:
+                row["total"][key] += entry[key]
+        found = list(grouped.values())
+        # 先按整行分值排，再按完成次数排：同一项目在多个孩子身上的量级一眼可见。
         found.sort(
             key=lambda item: (
-                item["account_id"],
                 -abs(item["total"]["coins"] + item["total"]["payout"]),
                 -item["total"]["count"],
                 item["name"],
@@ -2304,23 +2412,19 @@ def item_period_stats(conn: sqlite3.Connection, account_ids: list[int], unit: st
     return result
 
 
-def recent_flow_payload(conn: sqlite3.Connection, account_id: int) -> dict[str, Any]:
+def recent_flow_payload(conn: sqlite3.Connection, account_ids: list[int]) -> dict[str, Any]:
+    """近 7 天得分/失分：每个项目一行，每个孩子一列。"""
     start_date = (date.fromisoformat(current_date()) - timedelta(days=RECENT_WINDOW_DAYS - 1)).isoformat()
-    flows = flow_groups(conn, [account_id], start_date)
-    rows = conn.execute(
-        """
-        SELECT COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS gained,
-               COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS lost
-        FROM records WHERE account_id = ? AND date >= ?
-        """,
-        (account_id, start_date),
-    ).fetchone()
+    flows = flow_groups(conn, account_ids, start_date)
+    gained = sum(entry["total"] for entry in flows["gained"])
+    lost = sum(entry["total"] for entry in flows["lost"])
     return {
-        "gained": int(rows["gained"]),
-        "lost": int(rows["lost"]),
-        "net": int(rows["gained"]) - int(rows["lost"]),
-        "top_gained": flows["gained"][:5],
-        "top_lost": flows["lost"][:5],
+        "children": scope_children(conn, account_ids),
+        "gained_items": flows["gained"][:RECENT_FLOW_ROWS],
+        "lost_items": flows["lost"][:RECENT_FLOW_ROWS],
+        "gained_total": gained,
+        "lost_total": lost,
+        "net": gained - lost,
     }
 
 
@@ -2444,9 +2548,9 @@ def xlsx_text_cell(ref: str, text: str, style: int) -> str:
 
 
 XLSX_CELL_PADDING = 1.5  # 边框和光标占的宽度，Excel 会把这些留在文字之外
-# 下限保证格子还能手写，上限防止一个过长的项目名把整张表拉宽。
+# 下限保证格子还能手写，上限防止一个过长的项目名或规则正文把整张表拉宽。
 XLSX_NAME_BOUNDS = (18.0, 34.0)
-XLSX_GOAL_BOUNDS = (9.0, 16.0)
+XLSX_RULE_BOUNDS = (18.0, 40.0)
 XLSX_BOX_BOUNDS = (6.0, 8.0)
 XLSX_BODY_HEIGHT_BASE = 26.0
 XLSX_BODY_LINE_HEIGHT = 15.0
@@ -2472,7 +2576,7 @@ def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) ->
     last_column = xlsx_column(columns)
     body_start = len(heads) + 2
     name_width = xlsx_auto_width([row[0] for row in rows], XLSX_NAME_BOUNDS)
-    goal_width = xlsx_auto_width([row[1] for row in rows], XLSX_GOAL_BOUNDS)
+    rule_width = xlsx_auto_width([row[1] for row in rows], XLSX_RULE_BOUNDS)
     box_width = xlsx_auto_width(
         [cell for head in heads for cell in head[2:]] + [cell for row in rows for cell in row[2:]], XLSX_BOX_BOUNDS
     )
@@ -2482,7 +2586,7 @@ def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) ->
         lines.append(f'<row r="{index}" ht="16" customHeight="1">{cells}</row>')
     for offset, row in enumerate(rows):
         index = body_start + offset
-        wrapped_lines = max(xlsx_line_count(row[0], name_width), xlsx_line_count(row[1], goal_width))
+        wrapped_lines = max(xlsx_line_count(row[0], name_width), xlsx_line_count(row[1], rule_width))
         height = XLSX_BODY_HEIGHT_BASE + XLSX_BODY_LINE_HEIGHT * (wrapped_lines - 1)
         boxes = []
         for column in range(3, columns + 1):
@@ -2492,7 +2596,7 @@ def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) ->
             boxes.append(xlsx_text_cell(ref, text, 4) if text else f'<c r="{ref}" s="4"/>')
         lines.append(
             f'<row r="{index}" ht="{height:g}" customHeight="1">'
-            f'{xlsx_text_cell(f"A{index}", row[0], 3)}{xlsx_text_cell(f"B{index}", row[1], 4)}{"".join(boxes)}</row>'
+            f'{xlsx_text_cell(f"A{index}", row[0], 3)}{xlsx_text_cell(f"B{index}", row[1], 3)}{"".join(boxes)}</row>'
         )
     return (
         f"{XML_HEADER}<worksheet xmlns=\"{SHEET_NS}\">"
@@ -2502,7 +2606,7 @@ def xlsx_worksheet(title: str, heads: list[list[str]], rows: list[list[str]]) ->
         f'<pane xSplit="2" ySplit="{body_start - 1}" topLeftCell="C{body_start}" activePane="bottomRight" state="frozen"/>'
         "</sheetView></sheetViews>"
         '<sheetFormatPr defaultRowHeight="15"/>'
-        f'<cols><col min="1" max="1" width="{name_width:g}" customWidth="1"/><col min="2" max="2" width="{goal_width:g}" customWidth="1"/>'
+        f'<cols><col min="1" max="1" width="{name_width:g}" customWidth="1"/><col min="2" max="2" width="{rule_width:g}" customWidth="1"/>'
         f'<col min="3" max="{columns}" width="{box_width:g}" customWidth="1"/></cols>'
         f'<sheetData>{"".join(lines)}</sheetData>'
         f'<mergeCells count="1"><mergeCell ref="A1:{last_column}1"/></mergeCells>'
@@ -2583,19 +2687,23 @@ def target_sheet_request(payload: dict[str, Any]) -> dict[str, Any]:
     raw_heads = payload.get("heads")
     if not isinstance(raw_heads, list) or len(raw_heads) != 2:
         raise ValueError("导出表头需要两行")
-    heads = [[str(cell)[:12] for cell in head[:TARGET_SHEET_MAX_COLUMNS]] for head in raw_heads if isinstance(head, list)]
+    heads = [[str(cell)[:TARGET_SHEET_MAX_CELL] for cell in head[:TARGET_SHEET_MAX_COLUMNS]] for head in raw_heads if isinstance(head, list)]
     if len(heads) != 2 or len(heads[0]) < 3 or len(heads[1]) != len(heads[0]):
         raise ValueError("导出表头列数不符")
     sheets = []
     for entry in (payload.get("sheets") or [])[:TARGET_SHEET_MAX_CHILDREN]:
         if not isinstance(entry, dict):
             continue
-        name = str(entry.get("name") or "").strip()[:40]
+        name = str(entry.get("name") or "").strip()[:TARGET_SHEET_MAX_NAME]
         rows = []
         for row in (entry.get("rows") or [])[:TARGET_SHEET_MAX_ROWS]:
-            if isinstance(row, list) and len(row) >= 2 and str(row[0]).strip():
-                cells = [str(cell)[:12] for cell in row[2 : 2 + TARGET_SHEET_MAX_COLUMNS]]
-                rows.append([str(row[0])[:40], str(row[1])[:24], *cells])
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            item_name = str(row[0]).strip()[:TARGET_SHEET_MAX_NAME]
+            if not item_name:
+                continue
+            cells = [str(cell)[:TARGET_SHEET_MAX_CELL] for cell in row[2 : 2 + TARGET_SHEET_MAX_COLUMNS]]
+            rows.append([item_name, str(row[1])[:TARGET_SHEET_MAX_RULE], *cells])
         if name and rows:
             sheets.append({"name": name, "rows": rows})
     if not sheets:
@@ -2625,14 +2733,14 @@ def target_status_request(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(entry, dict):
             continue
         try:
-            account_id = int(entry.get("child"))
-        except (TypeError, ValueError) as exc:
+            account_id = int_field(entry.get("child"), "孩子标识")
+        except ValueError as exc:
             raise ValueError("孩子标识无效") from exc
         keys: list[tuple[str, int]] = []
         for ref in (entry.get("items") or [])[:TARGET_SHEET_MAX_ROWS]:
             kind, _, raw_id = str(ref).partition(":")
             try:
-                item_id = int(raw_id)
+                item_id = int_field(raw_id, "统计的项目")
             except ValueError as exc:
                 raise ValueError("统计的项目无效") from exc
             if kind not in ITEM_KINDS:
@@ -2828,40 +2936,30 @@ def announcement_rows(conn: sqlite3.Connection, user: sqlite3.Row) -> list[dict[
 
 
 def unlock_achievements(conn: sqlite3.Connection, account_id: int) -> None:
-    completed_tasks = completed_task_count(conn, account_id)
-    epic_tasks = int(
-        conn.execute(
+    task_counts = {
+        row["task_type"]: int(row["total"])
+        for row in conn.execute(
             """
-            SELECT COUNT(*)
+            SELECT t.task_type, COUNT(*) AS total
             FROM task_assignments ta
             JOIN tasks t ON t.id = ta.task_id
-            WHERE ta.account_id = ? AND ta.status = 'completed' AND t.task_type = 'epic'
+            WHERE ta.account_id = ? AND ta.status = 'completed'
+            GROUP BY t.task_type
             """,
             (account_id,),
-        ).fetchone()[0]
-    )
+        )
+    }
     earned_coins = int(
         conn.execute(
             "SELECT COALESCE(SUM(amount), 0) FROM records WHERE account_id = ? AND amount > 0",
             (account_id,),
         ).fetchone()[0]
     )
-    daily_tasks = int(
-        conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM task_assignments ta
-            JOIN tasks t ON t.id = ta.task_id
-            WHERE ta.account_id = ? AND ta.status = 'completed' AND t.task_type = 'daily'
-            """,
-            (account_id,),
-        ).fetchone()[0]
-    )
     progress = {
-        "completed_tasks": completed_tasks,
-        "epic_tasks": epic_tasks,
+        "completed_tasks": sum(task_counts.values()),
+        "epic_tasks": task_counts.get("epic", 0),
         "earned_coins": earned_coins,
-        "daily_tasks": daily_tasks,
+        "daily_tasks": task_counts.get("daily", 0),
     }
     definitions = conn.execute("SELECT * FROM achievements").fetchall()
     now = now_iso()
@@ -2900,7 +2998,8 @@ def state_payload(conn: sqlite3.Connection, user: sqlite3.Row) -> dict[str, Any]
         "version": APP_VERSION,
         "settings": settings_payload(conn, account_id),
         "user": safe_account(user),
-        "children": [safe_account(row) for row in children],
+        # 孩子账号只需要知道自己的那几项，别把兄弟姐妹的账号信息一并下发。
+        "children": [safe_account(row) for row in children] if is_admin else [],
         "active_child": safe_account(conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()) if account_id else None,
         "active_child_id": account_id,
         "total_points": get_balance(conn, account_id) if account_id else 0,
@@ -2918,7 +3017,7 @@ def state_payload(conn: sqlite3.Connection, user: sqlite3.Row) -> dict[str, Any]
         "item_library": {kind: item_rows(conn, kind) for kind in ITEM_TABLES} if is_admin else None,
         "item_bindings": binding_state(conn, child_ids) if is_admin else None,
         "item_rules": rule_override_state(conn, child_ids) if is_admin else None,
-        "recent_flow": recent_flow_payload(conn, account_id) if account_id else None,
+        "recent_flow": recent_flow_payload(conn, settle_ids) if settle_ids else None,
     }
     return payload
 
@@ -3129,8 +3228,8 @@ def auth_me():
 def select_child():
     payload = request.get_json(silent=True) or {}
     try:
-        child_id = int(payload.get("child_id"))
-    except (TypeError, ValueError):
+        child_id = int_field(payload.get("child_id"), "孩子账号")
+    except ValueError:
         return api_error("孩子账号无效")
     with connection() as conn:
         user = current_user(conn)
@@ -3312,7 +3411,7 @@ def task_payload(payload: dict[str, Any], task: sqlite3.Row | None) -> dict[str,
     def fallback(key: str, default: Any) -> Any:
         return payload.get(key, task[key] if task is not None else default)
 
-    due_date_value = str(payload.get("due_date") or "").strip()
+    due_date_value = str(fallback("due_date", "") or "").strip()
     result = {
         "title": str(fallback("title", "")).strip()[:80],
         "description": str(fallback("description", "")).strip()[:240],
@@ -3466,19 +3565,18 @@ def approve_task(assignment_id: int):
         if reviewed.rowcount != 1:
             return api_error("待审核的任务提交不存在", 404)
         reward_coins = adjusted_earn_coins(conn, int(assignment["account_id"]), int(assignment["reward_coins"]))
-        conn.execute(
-            """
-            INSERT INTO records(account_id, title, amount, type, date, time, created_at, source)
-            VALUES (?, ?, ?, 'income', ?, ?, ?, 'task')
-            """,
-            (
-                assignment["account_id"],
-                f"任务完成：{assignment['title']}",
-                reward_coins,
-                current_date(),
-                current_time(),
-                now,
-            ),
+        insert_record(
+            conn,
+            int(assignment["account_id"]),
+            f"任务完成：{assignment['title']}",
+            reward_coins,
+            "income",
+            current_date(),
+            current_time(),
+            item_kind=None,
+            item_id=None,
+            source="task",
+            created_at=now,
         )
         unlock_achievements(conn, int(assignment["account_id"]))
         return jsonify(state_payload(conn, user))
@@ -3563,6 +3661,43 @@ def noted_title(note: str, name: str) -> str:
     return f"{name}（{note}）" if note else name
 
 
+def insert_record(
+    conn: sqlite3.Connection,
+    account_id: int,
+    title: str,
+    amount: int,
+    record_type: str,
+    record_date: str,
+    record_time: str,
+    *,
+    item_kind: str | None,
+    item_id: int | None,
+    source: str,
+    quantity: int = 0,
+    created_at: str | None = None,
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO records(account_id, title, amount, type, date, time, created_at, item_kind, item_id, source, quantity)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            account_id,
+            title,
+            amount,
+            record_type,
+            record_date,
+            record_time,
+            created_at or now_iso(),
+            item_kind,
+            item_id,
+            source,
+            quantity,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
 @app.post("/api/transactions")
 @require_user
 def create_transaction():
@@ -3641,10 +3776,7 @@ def create_transaction():
                         amount = int(item["points"]) if manual_kind == "earn" else -int(item["points"])
                         transaction_type = "income" if amount > 0 else "expense"
                 else:
-                    try:
-                        amount = int(points_value)
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError("积分数值必须是整数") from exc
+                    amount = int_field(points_value, "积分数值")
                     if amount == 0:
                         raise ValueError("积分数值不能为 0")
                     name = f"补积分：{name}" if name else "补积分"
@@ -3687,28 +3819,27 @@ def create_transaction():
                     ),
                 )
                 return jsonify({"request_submitted": True, "request_id": cursor.lastrowid, **state_payload(conn, user)}), 202
-            cursor = conn.execute(
-                """
-                INSERT INTO records(account_id, title, amount, type, date, time, created_at, item_kind, item_id, source, quantity)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    account_id,
-                    name,
-                    amount,
-                    transaction_type,
-                    transaction_date,
-                    transaction_time,
-                    now_iso(),
-                    item_kind,
-                    item_id if item_kind else None,
-                    source,
-                    quantity,
-                ),
+            record_id = insert_record(
+                conn,
+                account_id,
+                name,
+                amount,
+                transaction_type,
+                transaction_date,
+                transaction_time,
+                item_kind=item_kind,
+                item_id=item_id if item_kind else None,
+                source=source,
+                quantity=quantity,
             )
+            # 兑换不能把余额花成负数，加/扣分与补录可以；先落账再查余额，写锁让并发兑换排队，
+            # 后到的那笔此时才看得见前一笔的扣款。
+            if kind in ("exchange", "cash_exchange") and get_balance(conn, account_id) < 0:
+                conn.rollback()
+                return api_error("积分不足", 409)
             # 在下面这串应答之前先重算，让应答里的角标和发放已经包含这条记录。
             regrade_after_log(conn, account_id, item_kind, item_id, transaction_date)
-            return jsonify({"record_id": cursor.lastrowid, **state_payload(conn, user)}), 201
+            return jsonify({"record_id": record_id, **state_payload(conn, user)}), 201
     except (TypeError, ValueError) as exc:
         return api_error(str(exc))
 
@@ -3723,8 +3854,6 @@ def approve_request(request_id: int):
         ).fetchone()
         if point_request is None:
             return api_error("待审核申请不存在或已经处理", 404)
-        if point_request["amount"] < 0 and get_balance(conn, point_request["account_id"]) < abs(point_request["amount"]):
-            return api_error("当前积分不足，无法通过兑换申请", 409)
         if point_request["item_kind"] == "earn" and point_request["item_id"]:
             try:
                 ensure_submit_cap(
@@ -3743,24 +3872,22 @@ def approve_request(request_id: int):
         )
         if reviewed.rowcount != 1:
             return api_error("待审核申请不存在或已经处理", 404)
-        conn.execute(
-            """
-            INSERT INTO records(account_id, title, amount, type, date, time, created_at, item_kind, item_id, source, quantity)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                point_request["account_id"],
-                point_request["title"],
-                point_request["amount"],
-                point_request["type"],
-                point_request["date"],
-                point_request["time"],
-                now_iso(),
-                point_request["item_kind"],
-                point_request["item_id"],
-                point_request["source"] or point_request["kind"],
-                point_request["quantity"] or 0,
-            ),
+        # 抢下申请后再查余额：写锁让并发审批排队，后通过的那笔才看得见前一笔的扣款。
+        if point_request["amount"] < 0 and get_balance(conn, point_request["account_id"]) < abs(point_request["amount"]):
+            conn.rollback()
+            return api_error("当前积分不足，无法通过兑换申请", 409)
+        insert_record(
+            conn,
+            int(point_request["account_id"]),
+            point_request["title"],
+            int(point_request["amount"]),
+            point_request["type"],
+            point_request["date"],
+            point_request["time"],
+            item_kind=point_request["item_kind"],
+            item_id=point_request["item_id"],
+            source=point_request["source"] or point_request["kind"],
+            quantity=point_request["quantity"] or 0,
         )
         # 审批通过的记录可能落在一个已经闭合的窗口里，所以它和别的记录一样重算自己的项目。
         regrade_after_log(
@@ -3905,8 +4032,8 @@ def reorder_items_endpoint(kind: str):
     if not isinstance(ids, list):
         return api_error("需要项目顺序列表")
     try:
-        ordered_ids = [int(value) for value in ids]
-    except (TypeError, ValueError):
+        ordered_ids = [int_field(value, "项目 id") for value in ids]
+    except ValueError:
         return api_error("项目 id 无效")
     with connection() as conn:
         user = current_user(conn)
@@ -3944,6 +4071,64 @@ def update_item_bindings(account_id: int):
             validated.append((kind, item_id, bool(entry.get("enabled", True))))
         for kind, item_id, enabled in validated:
             set_item_binding(conn, kind, item_id, account_id, enabled)
+        return jsonify(state_payload(conn, user))
+
+
+@app.post("/api/item-rules/copy")
+@require_admin
+def copy_item_rules():
+    """把系统库或某个孩子的整套计分规则抄给一批孩子，绑定可以一起复制。"""
+    payload = request.get_json(silent=True) or {}
+    raw_source = payload.get("source_id")
+    try:
+        source_id = None if raw_source in (None, "", 0, "0") else positive_int(raw_source, "来源账号")
+    except ValueError as exc:
+        return api_error(str(exc))
+    raw_targets = payload.get("target_ids")
+    if not isinstance(raw_targets, list) or not raw_targets:
+        return api_error("请选择要接收规则的孩子")
+    try:
+        target_ids = [positive_int(value, "目标账号") for value in raw_targets]
+    except ValueError as exc:
+        return api_error(str(exc))
+    if len(set(target_ids)) != len(target_ids):
+        return api_error("目标孩子有重复")
+    with connection() as conn:
+        user = current_user(conn)
+        if source_id is not None and conn.execute(
+            "SELECT 1 FROM accounts WHERE id = ? AND role = 'child'", (source_id,)
+        ).fetchone() is None:
+            return api_error("来源孩子不存在", 404)
+        placeholders = ", ".join("?" * len(target_ids))
+        known = {
+            int(row["id"])
+            for row in conn.execute(
+                f"SELECT id FROM accounts WHERE role = 'child' AND id IN ({placeholders})", target_ids
+            )
+        }
+        if len(known) != len(target_ids):
+            return api_error("目标孩子不存在", 404)
+        if source_id is not None and source_id in known:
+            return api_error("来源不能是接收的孩子")
+        # 先备好整批快照再动表：中途任何一项不合法，都不能留下半套规则。
+        rules: list[tuple[str, int, dict[str, Any]]] = []
+        for kind in ITEM_KINDS:
+            for item in scored_items(conn, kind, source_id):
+                try:
+                    rules.append((kind, int(item["id"]), item_rule_payload(kind, item)))
+                except ValueError as exc:
+                    return api_error(str(exc))
+        # 目标没有自己的快照时，锚点从库规则继承；来源是系统库时库规则就是来源本身。
+        libraries = {
+            kind: {int(item["id"]): item for item in scored_items(conn, kind)}
+            for kind in ITEM_KINDS
+        }
+        for target_id in target_ids:
+            existing = rule_overrides(conn, target_id)
+            for kind, item_id, rule in rules:
+                save_item_rule(conn, kind, item_id, target_id, rule, existing.get((kind, item_id)) or libraries[kind][item_id])
+            if payload.get("include_bindings"):
+                copy_item_bindings(conn, source_id, target_id)
         return jsonify(state_payload(conn, user))
 
 
@@ -3992,21 +4177,7 @@ def update_item_rule(account_id: int):
             rule = item_rule_payload(kind, body)
         except ValueError as exc:
             return api_error(str(exc))
-        # 像库里的编辑那样锚定：内容没变的复制保留旧锚点，真改了才重新锚定，没有规则的行本来就没锚点可继承。
-        base = existing if existing is not None else row
-        changed = any(base[column] != value for column, value in rule.items() if column in RULE_ANCHOR_FIELDS)
-        anchor = base["rule_set_at"] if base["rule_set_at"] and not changed else now_iso()
-        columns = ", ".join(rule)
-        conn.execute(
-            f"""
-            INSERT INTO item_rule_overrides(item_kind, item_id, account_id, {columns}, rule_set_at, updated_at)
-            VALUES (?, ?, ?, {", ".join("?" * len(rule))}, ?, ?)
-            ON CONFLICT(item_kind, item_id, account_id) DO UPDATE SET
-                {", ".join(f"{column} = excluded.{column}" for column in rule)},
-                rule_set_at = excluded.rule_set_at, updated_at = excluded.updated_at
-            """,
-            [kind, item_id, account_id, *rule.values(), anchor, now_iso()],
-        )
+        save_item_rule(conn, kind, item_id, account_id, rule, existing if existing is not None else row)
         return jsonify(state_payload(conn, user))
 
 
